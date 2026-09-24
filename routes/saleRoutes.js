@@ -13,5 +13,6 @@ router.post('/', asyncHandler(controller.create)) // moved above requireAuth for
 router.use(requireAuth)
 router.put('/:id', asyncHandler(controller.update))
 router.patch('/:id/cancel', asyncHandler(controller.cancel))
+router.patch('/:id', asyncHandler(controller.receivePayment))
 
 module.exports = router

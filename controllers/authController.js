@@ -38,7 +38,6 @@ const register = async (req, res) => {
     username,
     email: `${username}@local.user`,
     password: await bcrypt.hash(password, 12),
-    initialPassword: password,
     role,
     permissions,
     status: 'active',
@@ -88,7 +87,6 @@ const updateUser = async (req, res) => {
   if (password && password.trim() !== '') {
     const salt = await bcrypt.genSalt(10)
     updateData.password = await bcrypt.hash(password, salt)
-    updateData.initialPassword = password
   }
 
   const updatedUser = await User.findByIdAndUpdate(id, updateData, { new: true })

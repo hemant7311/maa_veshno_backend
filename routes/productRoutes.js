@@ -2,12 +2,15 @@ const express = require('express')
 const controller = require('../controllers/productController')
 const asyncHandler = require('../middleware/asyncHandler')
 const requireAuth = require('../middleware/auth')
-const { requirePermission } = require('../middleware/authorize')
+const { requirePermission, requireRole } = require('../middleware/authorize')
 
 const router = express.Router()
 
 // Public route
-router.get('/public', asyncHandler(controller.list))
+router.get('/public', asyncHandler(controller.listPublic))
+
+// Wholesale route
+router.get('/wholesale', requireAuth, requireRole(['wholesaler', 'admin']), asyncHandler(controller.listWholesale))
 
 router.use(requireAuth, requirePermission('products'))
 router.get('/', asyncHandler(controller.list))

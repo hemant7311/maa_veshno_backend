@@ -64,6 +64,20 @@ router.post('/', async (req, res, next) => {
   }
 })
 
+// GET /:id - Get supplier by ID
+router.get('/:id', async (req, res, next) => {
+  try {
+    // Ignore if id is "products" or something specific from other routes (handled by order)
+    const supplier = await Supplier.findById(req.params.id)
+    if (!supplier) {
+      return res.status(404).json({ success: false, message: 'Supplier not found' })
+    }
+    res.json({ success: true, data: supplier })
+  } catch (err) {
+    next(err)
+  }
+})
+
 // 3. GET /:id/products - Get all products supplied by this supplier ("kya kya maal aaya")
 router.get('/:id/products', async (req, res, next) => {
   try {

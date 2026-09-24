@@ -3,8 +3,10 @@ const controller = require('../controllers/reportController')
 const asyncHandler = require('../middleware/asyncHandler')
 const requireAuth = require('../middleware/auth')
 
+const { requirePermission } = require('../middleware/authorize')
+
 const router = express.Router()
-router.use(requireAuth)
+router.use(requireAuth, requirePermission('reports'))
 
 router.get('/', asyncHandler(controller.getAllReports))
 router.get('/sales', asyncHandler(controller.getSalesReport))

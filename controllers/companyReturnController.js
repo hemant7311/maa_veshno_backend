@@ -3,6 +3,7 @@ const Product = require('../models/Product')
 const Imei = require('../models/Imei')
 const Supplier = require('../models/Supplier')
 const Transaction = require('../models/Transaction')
+const mongoose = require('mongoose')
 
 const getAllReturns = async (req, res) => {
   try {
@@ -29,40 +30,55 @@ const getReturnById = async (req, res) => {
 }
 
 const createReturn = async (req, res) => {
+  const session = await mongoose.startSession()
+  session.startTransaction()
   try {
     const { supplier, supplierName, product, productName, imei, imeis, quantity, returnDate, reason, notes, purchasePrice } = req.body
 
     if (!product || !supplierName) {
+      await session.abortTransaction()
+      session.endSession()
       return res.status(422).json({ success: false, message: 'Product and supplier name are required', errors: {} })
     }
     if (!quantity || quantity <= 0) {
+      await session.abortTransaction()
+      session.endSession()
       return res.status(422).json({ success: false, message: 'Valid quantity is required', errors: {} })
     }
 
-    const productDoc = await Product.findById(product)
-    if (!productDoc) return res.status(404).json({ success: false, message: 'Product not found', errors: {} })
+    const productDoc = await Product.findById(product).session(session)
+    if (!productDoc) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Product not found', errors: {} })
+    }
 
     const allImeis = []
     if (imei) allImeis.push(imei)
     if (imeis && Array.isArray(imeis)) allImeis.push(...imeis)
 
     if (allImeis.length > 0) {
-      const imeiDocs = await Imei.find({ imeiNumber: { $in: allImeis } })
-      const foundImeis = imeiDocs.map(i => i.imeiNumber)
-      const missingImeis = allImeis.filter(i => !foundImeis.includes(i))
-      if (missingImeis.length > 0) {
-        return res.status(422).json({ success: false, message: `IMEIs not found: ${missingImeis.join(', ')}`, errors: {} })
+      if (allImeis.length !== quantity) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(422).json({ success: false, message: 'Quantity must match number of IMEIs provided', errors: {} })
       }
-      const alreadyReturned = imeiDocs.filter(i => i.status === 'returned').map(i => i.imeiNumber)
-      if (alreadyReturned.length > 0) {
-        return res.status(422).json({ success: false, message: `IMEIs already returned: ${alreadyReturned.join(', ')}`, errors: {} })
+      const imeiResult = await Imei.updateMany(
+        { imeiNumber: { $in: allImeis }, status: 'available' },
+        { $set: { status: 'returned' } },
+        { session }
+      )
+      if (imeiResult.modifiedCount !== allImeis.length) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(422).json({ success: false, message: 'One or more IMEIs are not available.', errors: {} })
       }
     }
 
     let supplierDoc = null
-    if (supplier) supplierDoc = await Supplier.findById(supplier)
+    if (supplier) supplierDoc = await Supplier.findById(supplier).session(session)
 
-    const companyReturn = await CompanyReturn.create({
+    const returnData = [{
       supplier: supplierDoc ? supplierDoc._id : null,
       supplierName: supplierDoc ? supplierDoc.name : supplierName,
       product: productDoc._id,
@@ -78,16 +94,39 @@ const createReturn = async (req, res) => {
       reason: reason || '',
       notes: notes || '',
       createdBy: req.user?._id
-    })
+    }]
+    const createdReturns = await CompanyReturn.create(returnData, { session })
+    const companyReturn = createdReturns[0]
 
-    if (allImeis.length > 0) {
-      await Imei.updateMany({ imeiNumber: { $in: allImeis } }, { $set: { status: 'returned' } })
+    const updatedProduct = await Product.findOneAndUpdate(
+      { _id: productDoc._id, stock: { $gte: Math.abs(quantity) } },
+      { $inc: { stock: -Math.abs(quantity) } },
+      { session, new: true }
+    )
+    if (!updatedProduct) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(422).json({ success: false, message: 'Insufficient stock to return', errors: {} })
     }
 
-    await Product.findByIdAndUpdate(productDoc._id, { $inc: { stock: -Math.abs(quantity) } })
+    const returnAmount = (purchasePrice || productDoc.purchasePrice || 0) * quantity;
+    if (supplierDoc && returnAmount > 0) {
+      supplierDoc.totalAmount = Math.max(0, (supplierDoc.totalAmount || 0) - returnAmount);
+      
+      if ((supplierDoc.pendingAmount || 0) >= returnAmount) {
+        supplierDoc.pendingAmount -= returnAmount;
+      } else {
+        const excess = returnAmount - (supplierDoc.pendingAmount || 0);
+        supplierDoc.pendingAmount = 0;
+        supplierDoc.paidAmount = Math.max(0, (supplierDoc.paidAmount || 0) - excess);
+      }
+      
+      supplierDoc.pendingAmount = Math.max(0, supplierDoc.totalAmount - (supplierDoc.paidAmount || 0));
+      await supplierDoc.save({ session });
+    }
 
     // Create transaction
-    await Transaction.create({
+    await Transaction.create([{
       transactionType: 'return',
       referenceId: companyReturn._id,
       referenceNumber: companyReturn.returnId || companyReturn._id.toString(),
@@ -97,34 +136,76 @@ const createReturn = async (req, res) => {
       relatedEntity: supplierDoc ? supplierDoc.name : supplierName,
       transactionDate: new Date(returnDate || Date.now()),
       createdBy: req.user?._id,
-    })
+    }], { session })
 
+    await session.commitTransaction()
+    session.endSession()
     res.status(201).json({ success: true, message: 'Company return created successfully', data: companyReturn })
   } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
     res.status(500).json({ success: false, message: 'Failed to create return', errors: { error: error.message } })
   }
 }
 
 const deleteReturn = async (req, res) => {
+  const session = await mongoose.startSession()
+  session.startTransaction()
   try {
-    const companyReturn = await CompanyReturn.findById(req.params.id)
-    if (!companyReturn) return res.status(404).json({ success: false, message: 'Company return not found', errors: {} })
+    const companyReturn = await CompanyReturn.findById(req.params.id).session(session)
+    if (!companyReturn) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Company return not found', errors: {} })
+    }
 
     const allImeis = []
     if (companyReturn.imei) allImeis.push(companyReturn.imei)
     if (companyReturn.imeis && Array.isArray(companyReturn.imeis)) allImeis.push(...companyReturn.imeis)
 
     if (allImeis.length > 0) {
-      await Imei.updateMany({ imeiNumber: { $in: allImeis } }, { $set: { status: 'available' } })
+      const imeiResult = await Imei.updateMany(
+        { imeiNumber: { $in: allImeis }, status: 'returned' },
+        { $set: { status: 'available' } },
+        { session }
+      )
+      if (imeiResult.modifiedCount !== allImeis.length) {
+         await session.abortTransaction()
+         session.endSession()
+         return res.status(422).json({ success: false, message: 'Cannot delete return: Some items are no longer in returned state.', errors: {} })
+      }
     }
 
     if (companyReturn.product) {
-      await Product.findByIdAndUpdate(companyReturn.product, { $inc: { stock: Math.abs(companyReturn.quantity || 1) } })
+      await Product.findByIdAndUpdate(companyReturn.product, { $inc: { stock: Math.abs(companyReturn.quantity || 1) } }, { session })
     }
 
-    await CompanyReturn.findByIdAndDelete(req.params.id)
+    if (companyReturn.supplier) {
+      const supplierDoc = await Supplier.findById(companyReturn.supplier).session(session);
+      if (supplierDoc) {
+        const returnAmount = (companyReturn.purchasePrice || 0) * (companyReturn.quantity || 1);
+        if (returnAmount > 0) {
+          supplierDoc.totalAmount = (supplierDoc.totalAmount || 0) + returnAmount;
+          // When we reverse the return, the supplier's total pending increases again.
+          // Because we don't know exactly if the original return deducted from pending or paid,
+          // we add it back to pending first (assuming no real money changed hands yet, just credit).
+          // If we want it perfectly symmetrical, we could just add it to pending.
+          supplierDoc.pendingAmount = (supplierDoc.pendingAmount || 0) + returnAmount;
+          supplierDoc.pendingAmount = Math.max(0, supplierDoc.totalAmount - (supplierDoc.paidAmount || 0));
+          await supplierDoc.save({ session });
+        }
+      }
+    }
+
+    await Transaction.findOneAndDelete({ referenceId: companyReturn._id, transactionType: 'return' }, { session })
+
+    await CompanyReturn.findByIdAndDelete(req.params.id, { session })
+    await session.commitTransaction()
+    session.endSession()
     res.json({ success: true, message: 'Company return deleted successfully', data: {} })
   } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
     res.status(500).json({ success: false, message: 'Failed to delete return', errors: { error: error.message } })
   }
 }

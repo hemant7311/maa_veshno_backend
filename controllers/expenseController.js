@@ -29,12 +29,16 @@ const getExpenseById = async (req, res) => {
 }
 
 const createExpense = async (req, res) => {
+  const session = await mongoose.startSession()
+  session.startTransaction()
   try {
     const { category, description, amount, date, paymentMethod, reference, notes } = req.body
     if (!description || amount === undefined || amount === null || amount <= 0) {
+      await session.abortTransaction()
+      session.endSession()
       return res.status(422).json({ success: false, message: 'Description and valid amount are required', errors: {} })
     }
-    const expense = await Expense.create({
+    const createdExpenses = await Expense.create([{
       category: category || 'general',
       description,
       amount,
@@ -43,34 +47,91 @@ const createExpense = async (req, res) => {
       reference: reference || '',
       notes: notes || '',
       createdBy: req.user?._id
-    })
+    }], { session })
+    const expense = createdExpenses[0]
+
+    const Transaction = require('../models/Transaction')
+    await Transaction.create([{
+      transactionType: 'expense',
+      referenceId: expense._id,
+      referenceNumber: expense._id.toString(),
+      description: `Expense: ${description}`,
+      amount,
+      paymentMethod: paymentMethod || 'cash',
+      relatedEntity: category || 'general',
+      transactionDate: new Date(date || Date.now()),
+      createdBy: req.user?._id,
+    }], { session })
+
+    await session.commitTransaction()
+    session.endSession()
     res.status(201).json({ success: true, message: 'Expense created successfully', data: expense })
   } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
     res.status(500).json({ success: false, message: 'Failed to create expense', errors: { error: error.message } })
   }
 }
 
 const updateExpense = async (req, res) => {
+  const session = await mongoose.startSession()
+  session.startTransaction()
   try {
     const { category, description, amount, date, paymentMethod, reference, notes } = req.body
     const expense = await Expense.findByIdAndUpdate(
       req.params.id,
       { category, description, amount, date, paymentMethod, reference, notes },
-      { new: true, runValidators: true }
+      { new: true, runValidators: true, session }
     )
-    if (!expense) return res.status(404).json({ success: false, message: 'Expense not found', errors: {} })
+    if (!expense) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Expense not found', errors: {} })
+    }
+
+    const Transaction = require('../models/Transaction')
+    await Transaction.findOneAndUpdate(
+      { referenceId: expense._id, transactionType: 'expense' },
+      {
+        description: `Expense: ${description}`,
+        amount,
+        paymentMethod: paymentMethod || 'cash',
+        relatedEntity: category || 'general',
+        transactionDate: new Date(date || Date.now())
+      },
+      { session }
+    )
+
+    await session.commitTransaction()
+    session.endSession()
     res.json({ success: true, message: 'Expense updated successfully', data: expense })
   } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
     res.status(500).json({ success: false, message: 'Failed to update expense', errors: { error: error.message } })
   }
 }
 
 const deleteExpense = async (req, res) => {
+  const session = await mongoose.startSession()
+  session.startTransaction()
   try {
-    const expense = await Expense.findByIdAndDelete(req.params.id)
-    if (!expense) return res.status(404).json({ success: false, message: 'Expense not found', errors: {} })
+    const expense = await Expense.findByIdAndDelete(req.params.id, { session })
+    if (!expense) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Expense not found', errors: {} })
+    }
+
+    const Transaction = require('../models/Transaction')
+    await Transaction.findOneAndDelete({ referenceId: req.params.id, transactionType: 'expense' }, { session })
+
+    await session.commitTransaction()
+    session.endSession()
     res.json({ success: true, message: 'Expense deleted successfully', data: {} })
   } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
     res.status(500).json({ success: false, message: 'Failed to delete expense', errors: { error: error.message } })
   }
 }

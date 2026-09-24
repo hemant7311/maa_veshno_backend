@@ -4,6 +4,10 @@ const Imei = require('../models/Imei')
 const withImeiStock = async (products) => {
   const productIds = products.map((product) => product._id)
   if (!productIds.length) return []
+  
+  const productsWithImeis = await Imei.distinct('productId', { productId: { $in: productIds } })
+  const productsWithImeisStr = new Set(productsWithImeis.map(String))
+
   const stockCounts = await Imei.aggregate([
     { $match: { productId: { $in: productIds }, status: 'available' } },
     { $group: { _id: '$productId', stock: { $sum: 1 } } },
@@ -22,16 +26,17 @@ const withImeiStock = async (products) => {
 
   return products.map((product) => {
     const key = String(product._id)
+    const isImeiProduct = productsWithImeisStr.has(key) || Boolean(product.imeiNumber)
     return {
       ...product.toObject(),
-      stock: stockByProductId.get(key) || 0,
+      stock: isImeiProduct ? (stockByProductId.get(key) || 0) : (product.stock || 0),
       imeiNumber: firstImeiMap.get(key) || product.imeiNumber || '—'
     }
   })
 }
 
 const productData = (body) => {
-  const { imeiNumber, imeiNumbers, stock, ...data } = body
+  const { imeiNumber, imeiNumbers, ...data } = body
   return data
 }
 
@@ -45,94 +50,182 @@ const list = async (req, res) => {
   res.json({ success: true, message: 'Products loaded', data: await withImeiStock(products) })
 }
 
+const listPublic = async (req, res) => {
+  const { search = '' } = req.query
+  const filter = search
+    ? { $or: [{ productName: new RegExp(search, 'i') }, { brand: new RegExp(search, 'i') }, { model: new RegExp(search, 'i') }] }
+    : { status: 'active' }
+  // Only select non-sensitive fields
+  const products = await Product.find(filter)
+    .select('-purchasePrice -supplierId -supplierType -wholesalePrice -imeiNumber -barcode')
+    .populate('categoryId', 'categoryName')
+    .sort({ createdAt: -1 })
+  
+  // Do not expose actual IMEI numbers or exact stock breakdown for public.
+  // We can just return a boolean inStock.
+  res.json({ 
+    success: true, 
+    message: 'Products loaded', 
+    data: products.map(p => ({
+      ...p.toObject(),
+      inStock: p.stock > 0
+    }))
+  })
+}
+
+const listWholesale = async (req, res) => {
+  const { search = '' } = req.query
+  const filter = search
+    ? { $or: [{ productName: new RegExp(search, 'i') }, { brand: new RegExp(search, 'i') }, { model: new RegExp(search, 'i') }] }
+    : { status: 'active' }
+  // Select fields for wholesalers (includes wholesalePrice, but hides purchasePrice and supplier details)
+  const products = await Product.find(filter)
+    .select('-purchasePrice -supplierId -supplierType -imeiNumber -barcode')
+    .populate('categoryId', 'categoryName')
+    .sort({ createdAt: -1 })
+  
+  res.json({ 
+    success: true, 
+    message: 'Products loaded', 
+    data: products.map(p => ({
+      ...p.toObject(),
+      inStock: p.stock > 0
+    }))
+  })
+}
+
 const getOne = async (req, res) => {
   const product = await Product.findById(req.params.id).populate('categoryId', 'categoryName')
   if (!product) return res.status(404).json({ success: false, message: 'Product not found', errors: {} })
   res.json({ success: true, message: 'Product loaded', data: (await withImeiStock([product]))[0] })
 }
 
+const mongoose = require('mongoose')
 const Supplier = require('../models/Supplier')
 
 const create = async (req, res) => {
-  const initialImei = String(req.body.imeiNumber || '').trim()
-  if (initialImei && await Imei.exists({ imeiNumber: initialImei })) {
-    return res.status(409).json({ success: false, message: 'This IMEI number already exists', errors: { imeiNumber: 'Duplicate IMEI number' } })
-  }
-  const product = await Product.create(productData(req.body))
+  const session = await mongoose.startSession()
+  session.startTransaction()
   try {
-    if (initialImei) await Imei.create({ productId: product._id, imeiNumber: initialImei })
+    const initialImei = String(req.body.imeiNumber || '').trim()
+    if (initialImei && await Imei.exists({ imeiNumber: initialImei })) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(409).json({ success: false, message: 'This IMEI number already exists', errors: { imeiNumber: 'Duplicate IMEI number' } })
+    }
+    
+    const pData = productData(req.body)
+    if (initialImei) {
+      pData.stock = 1
+    }
+    const createdProducts = await Product.create([pData], { session })
+    const product = createdProducts[0]
+
+    if (initialImei) await Imei.create([{ productId: product._id, imeiNumber: initialImei }], { session })
     
     // Adjust supplier ledger
     if (req.body.supplierId) {
-      const supplier = await Supplier.findById(req.body.supplierId)
+      const supplier = await Supplier.findById(req.body.supplierId).session(session)
       if (supplier) {
         const cost = Number(req.body.totalPurchasePrice || req.body.purchasePrice || 0)
         const paid = Number(req.body.amountPaidNow || 0)
-        supplier.totalAmount += cost
-        supplier.paidAmount += paid
+        supplier.totalAmount = (supplier.totalAmount || 0) + cost
+        supplier.paidAmount = (supplier.paidAmount || 0) + paid
         supplier.pendingAmount = Math.max(0, supplier.totalAmount - supplier.paidAmount)
-        await supplier.save()
+        await supplier.save({ session })
       }
     }
+    
+    await session.commitTransaction()
+    session.endSession()
+    res.status(201).json({ success: true, message: 'Product created', data: (await withImeiStock([product]))[0] })
   } catch (error) {
-    await Product.findByIdAndDelete(product._id)
-    throw error
+    await session.abortTransaction()
+    session.endSession()
+    res.status(500).json({ success: false, message: 'Failed to create product', errors: { error: error.message } })
   }
-  res.status(201).json({ success: true, message: 'Product created', data: (await withImeiStock([product]))[0] })
 }
 
 const update = async (req, res) => {
-  const oldProduct = await Product.findById(req.params.id)
-  if (!oldProduct) return res.status(404).json({ success: false, message: 'Product not found', errors: {} })
+  const session = await mongoose.startSession()
+  session.startTransaction()
+  try {
+    const oldProduct = await Product.findById(req.params.id).session(session)
+    if (!oldProduct) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Product not found', errors: {} })
+    }
 
-  const product = await Product.findByIdAndUpdate(req.params.id, productData(req.body), { returnDocument: 'after', runValidators: true })
-  
-  const oldPrice = Number(oldProduct.purchasePrice || 0)
-  const newPrice = Number(product.purchasePrice || 0)
-  const priceDiff = newPrice - oldPrice
+    const product = await Product.findByIdAndUpdate(req.params.id, productData(req.body), { new: true, runValidators: true, session })
+    
+    const oldPrice = Number(oldProduct.purchasePrice || 0)
+    const newPrice = Number(product.purchasePrice || 0)
+    const priceDiff = newPrice - oldPrice
 
-  if (priceDiff !== 0 && product.supplierId) {
-    const Supplier = require('../models/Supplier')
-    const supplier = await Supplier.findById(product.supplierId)
-    if (supplier) {
-      const imeiCount = await Imei.countDocuments({ productId: product._id, status: { $ne: 'archived' } })
-      if (imeiCount > 0) {
-        const totalDiff = priceDiff * imeiCount
-        supplier.totalAmount = Math.max(0, supplier.totalAmount + totalDiff)
-        supplier.pendingAmount = Math.max(0, supplier.totalAmount - supplier.paidAmount)
-        await supplier.save()
+    if (priceDiff !== 0 && product.supplierId) {
+      const supplier = await Supplier.findById(product.supplierId).session(session)
+      if (supplier) {
+        const imeiCount = await Imei.countDocuments({ productId: product._id, status: { $ne: 'archived' } }).session(session)
+        if (imeiCount > 0) {
+          const totalDiff = priceDiff * imeiCount
+          supplier.totalAmount = Math.max(0, supplier.totalAmount + totalDiff)
+          supplier.pendingAmount = Math.max(0, supplier.totalAmount - supplier.paidAmount)
+          await supplier.save({ session })
+        }
       }
     }
-  }
 
-  res.json({ success: true, message: 'Product updated', data: (await withImeiStock([product]))[0] })
+    await session.commitTransaction()
+    session.endSession()
+    res.json({ success: true, message: 'Product updated', data: (await withImeiStock([product]))[0] })
+  } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
+    res.status(500).json({ success: false, message: 'Failed to update product', errors: { error: error.message } })
+  }
 }
 
 const remove = async (req, res) => {
-  const product = await Product.findById(req.params.id)
-  if (!product) return res.status(404).json({ success: false, message: 'Product not found', errors: {} })
-  
-  // Deduct from supplier balance on delete if active
-  if (product.supplierId && product.status !== 'returned') {
-    const supplier = await Supplier.findById(product.supplierId)
-    if (supplier) {
-      const cost = Number(product.purchasePrice || 0)
-      supplier.totalAmount = Math.max(0, supplier.totalAmount - cost)
-      if (supplier.pendingAmount >= cost) {
-        supplier.pendingAmount -= cost
-      } else {
-        const excess = cost - supplier.pendingAmount
-        supplier.pendingAmount = 0
-        supplier.paidAmount = Math.max(0, supplier.paidAmount - excess)
-      }
-      supplier.pendingAmount = Math.max(0, supplier.totalAmount - supplier.paidAmount)
-      await supplier.save()
+  const session = await mongoose.startSession()
+  session.startTransaction()
+  try {
+    const product = await Product.findById(req.params.id).session(session)
+    if (!product) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Product not found', errors: {} })
     }
-  }
+    
+    // Deduct from supplier balance on delete if active
+    if (product.supplierId && product.status !== 'returned') {
+      const supplier = await Supplier.findById(product.supplierId).session(session)
+      if (supplier) {
+        const cost = Number(product.purchasePrice || 0)
+        supplier.totalAmount = Math.max(0, supplier.totalAmount - cost)
+        if (supplier.pendingAmount >= cost) {
+          supplier.pendingAmount -= cost
+        } else {
+          const excess = cost - supplier.pendingAmount
+          supplier.pendingAmount = 0
+          supplier.paidAmount = Math.max(0, supplier.paidAmount - excess)
+        }
+        supplier.pendingAmount = Math.max(0, supplier.totalAmount - supplier.paidAmount)
+        await supplier.save({ session })
+      }
+    }
 
-  await Product.findByIdAndDelete(req.params.id)
-  await Imei.deleteMany({ productId: product._id })
-  res.json({ success: true, message: 'Product deleted', data: {} })
+    await Product.findByIdAndDelete(req.params.id, { session })
+    await Imei.deleteMany({ productId: product._id }, { session })
+    
+    await session.commitTransaction()
+    session.endSession()
+    res.json({ success: true, message: 'Product deleted', data: {} })
+  } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
+    res.status(500).json({ success: false, message: 'Failed to delete product', errors: { error: error.message } })
+  }
 }
 
-module.exports = { list, getOne, create, update, remove }
+module.exports = { list, listPublic, listWholesale, getOne, create, update, remove }

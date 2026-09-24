@@ -70,10 +70,11 @@ app.use((error, req, res, next) => {
   }
   console.error('⚠️ ERROR:', error.message)
   console.error('   Stack:', error.stack)
+  const isDev = process.env.NODE_ENV === 'development'
   return res.status(500).json({ 
     success: false, 
     message: 'Internal server error', 
-    errors: { details: error.message } 
+    errors: isDev ? { details: error.message } : {} 
   })
 })
 

@@ -7,7 +7,6 @@ const userSchema = new mongoose.Schema(
     username: { type: String, trim: true, lowercase: true, unique: true, sparse: true },
     phone: { type: String, trim: true },
     password: { type: String, required: true, select: false },
-    initialPassword: { type: String }, // Store plain text for admin display purposes
     role: { type: String, enum: ['admin', 'staff', 'finance_agent', 'wholesaler'], default: 'staff' },
     permissions: [{ type: String }],
     financeEntityName: { type: String, trim: true },

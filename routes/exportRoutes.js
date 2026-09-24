@@ -3,8 +3,10 @@ const controller = require('../controllers/exportController')
 const asyncHandler = require('../middleware/asyncHandler')
 const requireAuth = require('../middleware/auth')
 
+const { requireAdmin } = require('../middleware/authorize')
+
 const router = express.Router()
-router.use(requireAuth)
+router.use(requireAuth, requireAdmin)
 
 router.get('/products', asyncHandler(controller.exportProducts))
 router.get('/customers', asyncHandler(controller.exportCustomers))

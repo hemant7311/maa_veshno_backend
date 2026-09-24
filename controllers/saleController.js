@@ -3,6 +3,8 @@ const Customer = require('../models/Customer')
 const Imei = require('../models/Imei')
 const Product = require('../models/Product')
 const Transaction = require('../models/Transaction')
+const mongoose = require('mongoose')
+const Counter = require('../models/Counter')
 
 const list = async (req, res) => {
   try {
@@ -44,55 +46,98 @@ const getOne = async (req, res) => {
 }
 
 const create = async (req, res) => {
-  // Track created objects for manual rollback
-  let createdSaleId = null
-  let imeiMarkedSold = []
-  let stockDecrements = []
-  let customerBalanceAdded = 0
-  let customerId = null
+  const session = await mongoose.startSession()
+  session.startTransaction()
 
   try {
     const { 
       invoiceNumber, customerName, phone, saleType, paymentMode, 
       items, subTotal, totalDiscount, totalTax, grandTotal, financeDetails,
       pickedBy, partyGst, warrantySaleAmount, delayPaymentExpected, amountPaid, amountDue, promisedDate
-
-
     } = req.body
 
-    
     if (!customerName || !phone || !items || !items.length) {
+      await session.abortTransaction()
+      session.endSession()
       return res.status(422).json({ success: false, message: 'Missing required sale details', errors: {} })
     }
     if (subTotal === undefined || grandTotal === undefined) {
+      await session.abortTransaction()
+      session.endSession()
       return res.status(422).json({ success: false, message: 'Missing amount fields', errors: {} })
     }
 
+    // Recalculate and verify totals
+    let calcSubTotal = 0;
+    for (const item of items) {
+      item.discount = Number(item.discount) || 0;
+      item.qty = Number(item.qty) || 1;
+      item.price = Number(item.price) || 0;
+      const itemTotal = (item.price * item.qty) - item.discount;
+      item.total = itemTotal;
+      calcSubTotal += itemTotal;
+    }
+    let calcTotalDiscount = Number(totalDiscount) || 0;
+    const calcTotalTax = Number(totalTax) || 0;
+    const calcWarranty = Number(warrantySaleAmount) || 0;
+    let calculatedGrandTotal = calcSubTotal - calcTotalDiscount + calcTotalTax + calcWarranty;
+
+    if (Math.abs(calcSubTotal - Number(subTotal)) > 1) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(422).json({ success: false, message: `Subtotal calculation mismatch. Expected: ${calcSubTotal}, got: ${subTotal}`, errors: {} });
+    }
+
+    if (Math.abs(calculatedGrandTotal - Number(grandTotal)) > 1) {
+      // User explicitly overrode grandTotal in the UI (customGrandTotal). Adjust discount to balance the equation.
+      calcTotalDiscount = calcSubTotal + calcTotalTax + calcWarranty - Number(grandTotal);
+      calculatedGrandTotal = Number(grandTotal);
+    }
+
+    const finalGrandTotal = calculatedGrandTotal;
+    let finalAmountPaid = amountPaid !== undefined ? Number(amountPaid) : 0;
+    if (finalAmountPaid < 0) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(422).json({ success: false, message: 'Payment cannot be negative.', errors: {} });
+    }
+    if (finalAmountPaid > finalGrandTotal) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(422).json({ success: false, message: 'Payment exceeds grand total.', errors: {} });
+    }
+    const finalAmountDue = finalGrandTotal - finalAmountPaid;
+    let billStatus = 'saved';
+    if (finalAmountDue <= 0) billStatus = 'paid';
+    else if (finalAmountPaid > 0) billStatus = 'partially_paid';
+    else billStatus = 'due';
+
     // 1. Find or create customer
-    let customer = await Customer.findOne({ phone })
+    let customer = await Customer.findOne({ phone }).session(session)
     if (!customer) {
-      customer = await Customer.create({ 
+      const custData = [{ 
         customerName, phone, 
         customerType: saleType === 'wholesale' ? 'wholesale' : 'retail',
-        totalPurchases: grandTotal,
+        totalPurchases: finalGrandTotal,
+        balance: finalAmountDue,
         address: req.body.address || '',
         gstNumber: req.body.partyGst || ''
-      })
+      }]
+      const createdCustomers = await Customer.create(custData, { session })
+      customer = createdCustomers[0]
     } else {
-      customer.totalPurchases = (customer.totalPurchases || 0) + grandTotal
-      customerBalanceAdded = grandTotal
-      customerId = customer._id
+      customer.totalPurchases = (customer.totalPurchases || 0) + finalGrandTotal
+      customer.balance = (customer.balance || 0) + finalAmountDue
       if (saleType === 'wholesale') customer.customerType = 'wholesale'
       if (req.body.address) customer.address = req.body.address
       if (req.body.partyGst) customer.gstNumber = req.body.partyGst
-      await customer.save()
+      await customer.save({ session })
     }
-    customerId = customer._id
 
     // 2. Lookup Purchase Prices for items
     for (const item of items) {
       if (item.productId) {
-        const p = await Product.findById(item.productId)
+        const p = await Product.findById(item.productId).session(session)
         if (p) item.purchasePrice = p.purchasePrice || 0
       }
     }
@@ -100,30 +145,29 @@ const create = async (req, res) => {
     // 3. Validate IMEI before creating sale
     const imeiList = items.map(item => item.imei).filter(Boolean)
     if (imeiList.length > 0) {
-      const existingSold = await Imei.find({ imeiNumber: { $in: imeiList }, status: 'sold' })
-      if (existingSold.length > 0) {
-        // Rollback customer balance
-        if (customerBalanceAdded > 0) {
-          await Customer.findByIdAndUpdate(customerId, { $inc: { totalPurchases: -customerBalanceAdded } })
-        }
-        return res.status(422).json({ success: false, message: `IMEI ${existingSold[0].imeiNumber} is already sold.`, errors: {} })
+      const imeiResult = await Imei.updateMany(
+        { imeiNumber: { $in: imeiList }, status: 'available' },
+        { $set: { status: 'sold', soldAt: new Date() } },
+        { session }
+      )
+      if (imeiResult.modifiedCount !== imeiList.length) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(422).json({ success: false, message: 'One or more IMEIs are not available or already sold.', errors: {} })
       }
     }
 
     // 4. Create the sale record
     let inv = invoiceNumber;
     if (!inv || String(inv).includes('MVM-RET') || String(inv).includes('INV-')) {
-      const lastSale = await Sale.findOne({ invoiceNumber: { $regex: '^[0-9]+$' } }).sort({ createdAt: -1 });
-      let nextInv = 1;
-      if (lastSale && !isNaN(lastSale.invoiceNumber)) {
-        nextInv = parseInt(lastSale.invoiceNumber) + 1;
-      } else {
-        const count = await Sale.countDocuments();
-        nextInv = count + 1;
-      }
-      inv = nextInv.toString();
+      const counter = await Counter.findByIdAndUpdate(
+        { _id: 'invoiceNumber' },
+        { $inc: { seq: 1 } },
+        { new: true, upsert: true, session }
+      );
+      inv = counter.seq.toString();
     }
-    const sale = await Sale.create({
+    const saleData = [{
       invoiceNumber: inv,
       customerId: customer._id,
       customerName,
@@ -131,66 +175,76 @@ const create = async (req, res) => {
       saleType,
       paymentMode,
       items,
-      subTotal,
-      totalDiscount,
-      totalTax,
-      grandTotal,
+      subTotal: calcSubTotal,
+      totalDiscount: calcTotalDiscount,
+      totalTax: calcTotalTax,
+      grandTotal: finalGrandTotal,
       financeDetails,
       pickedBy,
       partyGst,
-      warrantySaleAmount,
+      warrantySaleAmount: calcWarranty,
       delayPaymentExpected,
-      createdBy: req.user?._id
-    })
-    createdSaleId = sale._id
+      createdBy: req.user?._id,
+      amountPaid: finalAmountPaid,
+      amountDue: finalAmountDue,
+      billStatus,
+      promisedDate
+    }]
+    const createdSales = await Sale.create(saleData, { session })
+    const sale = createdSales[0]
 
-    // 5. Update IMEIs as sold
-    if (imeiList.length > 0) {
-      await Imei.updateMany(
-        { imeiNumber: { $in: imeiList } },
-        { $set: { status: 'sold', soldAt: new Date() } }
-      )
-      imeiMarkedSold = imeiList
-    }
-
-    // 6. Decrement Product Stock
+    // 5. Decrement Product Stock Atomically
     for (const item of items) {
       if (item.productId) {
-        await Product.findByIdAndUpdate(item.productId, { $inc: { stock: -Math.abs(item.qty || 1) } })
-        stockDecrements.push({ productId: item.productId, qty: item.qty || 1 })
+        const qtyToDeduct = Math.abs(item.qty || 1)
+        const updatedProduct = await Product.findOneAndUpdate(
+          { _id: item.productId, stock: { $gte: qtyToDeduct } },
+          { $inc: { stock: -qtyToDeduct } },
+          { session, new: true }
+        )
+        if (!updatedProduct) {
+          await session.abortTransaction()
+          session.endSession()
+          return res.status(422).json({ success: false, message: `Insufficient stock for product: ${item.productName || 'Unknown'}`, errors: {} })
+        }
       }
     }
 
-    // 7. Create transaction record
-    await Transaction.create({
+    // 7. Create transaction records
+    const txns = [{
       transactionType: 'sale',
       referenceId: sale._id,
       referenceNumber: sale.invoiceNumber,
       description: `Sale to ${customerName}`,
-      amount: grandTotal,
+      amount: finalGrandTotal,
       paymentMethod: paymentMode === 'finance' ? 'credit' : (paymentMode || 'cash'),
       relatedEntity: customerName,
       transactionDate: new Date(),
       createdBy: req.user?._id,
-    })
+    }];
+    
+    if (finalAmountPaid > 0) {
+      txns.push({
+        transactionType: 'customer_payment',
+        referenceId: sale._id,
+        referenceNumber: sale.invoiceNumber,
+        description: `Payment for Sale ${sale.invoiceNumber}`,
+        amount: finalAmountPaid,
+        paymentMethod: paymentMode === 'finance' ? 'credit' : (paymentMode || 'cash'),
+        relatedEntity: customerName,
+        transactionDate: new Date(),
+        createdBy: req.user?._id,
+      });
+    }
+    await Transaction.create(txns, { session })
+
+    await session.commitTransaction()
+    session.endSession()
 
     res.status(201).json({ success: true, message: 'Sale created successfully', data: sale })
   } catch (error) {
-    // Manual rollback
-    try {
-      if (createdSaleId) await Sale.findByIdAndDelete(createdSaleId)
-      if (imeiMarkedSold.length > 0) {
-        await Imei.updateMany({ imeiNumber: { $in: imeiMarkedSold } }, { $set: { status: 'available', soldAt: null } })
-      }
-      for (const d of stockDecrements) {
-        await Product.findByIdAndUpdate(d.productId, { $inc: { stock: d.qty } })
-      }
-      if (customerBalanceAdded > 0 && customerId) {
-        await Customer.findByIdAndUpdate(customerId, { $inc: { totalPurchases: -customerBalanceAdded } })
-      }
-    } catch (rollbackError) {
-      console.error('[SALE] Rollback error:', rollbackError.message)
-    }
+    await session.abortTransaction()
+    session.endSession()
     console.error('[SALE] ERROR:', error.message)
     res.status(500).json({ success: false, message: error.message || 'Failed to create sale', errors: { error: error.message } })
   }
@@ -205,20 +259,65 @@ const getPendingEmiNotifications = async (req, res) => {
       saleType: 'retail',
       status: { $ne: 'cancelled' },
       $or: [
-        { paymentMode: 'finance', createdAt: { $lte: thirtyDaysAgo } },
+        { paymentMode: 'finance' },
         { delayPaymentExpected: true }
       ]
     }).sort({ createdAt: -1 })
 
+    const today = new Date();
+    today.setHours(0,0,0,0);
+
     const notifications = sales.map(s => {
-      let daysSince = Math.floor((new Date() - new Date(s.createdAt)) / (1000 * 60 * 60 * 24))
-      if (s.promisedDate) {
-         daysSince = Math.floor((new Date() - new Date(s.promisedDate)) / (1000 * 60 * 60 * 24))
+      if (s.delayPaymentExpected) {
+         let isDue = false;
+         let daysSince = 0;
+         if (s.promisedDate) {
+            const promDate = new Date(s.promisedDate);
+            promDate.setHours(0,0,0,0);
+            daysSince = Math.floor((today - promDate) / (1000 * 60 * 60 * 24));
+            if (daysSince >= -2) isDue = true; // Show starting 2 days before promised date
+         } else {
+            const createDate = new Date(s.createdAt);
+            createDate.setHours(0,0,0,0);
+            daysSince = Math.floor((today - createDate) / (1000 * 60 * 60 * 24));
+            if (daysSince >= 28) isDue = true;
+         }
+         
+         if (isDue) {
+             const dueAmount = s.amountDue !== undefined ? s.amountDue : s.grandTotal;
+             if (dueAmount > 0) {
+                 return { id: s._id, customerName: s.customerName, phone: s.phone, type: 'Delayed Payment', daysSince, dueAmount, invoiceNumber: s.invoiceNumber, date: s.createdAt, promisedDate: s.promisedDate };
+             }
+         }
+         return null;
       }
-      const type = s.delayPaymentExpected ? 'Delayed Payment' : 'EMI Due'
-      const dueAmount = s.amountDue !== undefined ? s.amountDue : (s.financeDetails?.emiAmount || s.grandTotal)
-      return { id: s._id, customerName: s.customerName, phone: s.phone, type, daysSince, dueAmount, invoiceNumber: s.invoiceNumber, date: s.createdAt, promisedDate: s.promisedDate }
-    }).filter(n => n.dueAmount > 0)
+      
+      if (s.paymentMode === 'finance') {
+         let isDue = false;
+         let daysSince = 0;
+         let promDateStr = null;
+         
+         if (s.financeDetails?.emiPayDate) {
+             const emiDate = new Date(s.financeDetails.emiPayDate);
+             emiDate.setHours(0,0,0,0);
+             daysSince = Math.floor((today - emiDate) / (1000 * 60 * 60 * 24));
+             if (daysSince >= -2) isDue = true; // Show starting 2 days before the custom date
+             promDateStr = emiDate;
+         } else {
+             const createDate = new Date(s.createdAt);
+             createDate.setHours(0,0,0,0);
+             daysSince = Math.floor((today - createDate) / (1000 * 60 * 60 * 24));
+             if (daysSince >= 28) isDue = true;
+         }
+         
+         if (isDue) {
+             const dueAmount = s.financeDetails?.emiAmount || 0;
+             return { id: s._id, customerName: s.customerName, phone: s.phone, type: 'EMI Due', daysSince, dueAmount, invoiceNumber: s.invoiceNumber, date: s.createdAt, promisedDate: promDateStr };
+         }
+      }
+      return null;
+    }).filter(n => n !== null);
+    
     res.json({ success: true, data: notifications })
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to get EMI notifications', errors: { error: error.message } })
@@ -279,107 +378,275 @@ const getBalanceSheet = async (req, res) => {
 }
 
 const update = async (req, res) => {
+  const session = await mongoose.startSession()
+  session.startTransaction()
   try {
     const saleId = req.params.id
-    const oldSale = await Sale.findById(saleId)
+    const oldSale = await Sale.findById(saleId).session(session)
     
-    if (!oldSale) return res.status(404).json({ success: false, message: 'Sale not found', errors: {} })
-    if (oldSale.status === 'cancelled') return res.status(422).json({ success: false, message: 'Cannot edit a cancelled sale', errors: {} })
+    if (!oldSale) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Sale not found', errors: {} })
+    }
+    if (oldSale.status === 'cancelled') {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(422).json({ success: false, message: 'Cannot edit a cancelled sale', errors: {} })
+    }
 
-    const { items, subTotal, totalDiscount, totalTax, grandTotal, partyGst, amountPaid, amountDue, promisedDate } = req.body
+    const { items, subTotal, totalDiscount, totalTax, grandTotal, partyGst, amountPaid, promisedDate } = req.body
+
+    // Recalculate totals
+    let calcSubTotal = 0;
+    for (const item of items) {
+      item.discount = Number(item.discount) || 0;
+      item.qty = Number(item.qty) || 1;
+      item.price = Number(item.price) || 0;
+      const itemTotal = (item.price * item.qty) - item.discount;
+      item.total = itemTotal;
+      calcSubTotal += itemTotal;
+    }
+    let calcTotalDiscount = Number(totalDiscount) || 0;
+    const calcTotalTax = Number(totalTax) || 0;
+    const calcWarranty = Number(req.body.warrantySaleAmount) || 0;
+    let calculatedGrandTotal = calcSubTotal - calcTotalDiscount + calcTotalTax + calcWarranty;
+
+    if (Math.abs(calcSubTotal - Number(subTotal)) > 1) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(422).json({ success: false, message: `Subtotal calculation mismatch. Expected: ${calcSubTotal}, got: ${subTotal}`, errors: {} });
+    }
+
+    if (Math.abs(calculatedGrandTotal - Number(grandTotal)) > 1) {
+      // User explicitly overrode grandTotal in the UI (customGrandTotal). Adjust discount to balance the equation.
+      calcTotalDiscount = calcSubTotal + calcTotalTax + calcWarranty - Number(grandTotal);
+      calculatedGrandTotal = Number(grandTotal);
+    }
+
+    const finalGrandTotal = calculatedGrandTotal;
+    let additionalPayment = 0;
+    if (amountPaid !== undefined) {
+      additionalPayment = Number(amountPaid);
+    }
+    
+    const finalAmountPaid = (oldSale.amountPaid || 0) + additionalPayment;
+    if (finalAmountPaid < 0) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(422).json({ success: false, message: 'Total payment cannot be less than zero.', errors: {} });
+    }
+    if (finalAmountPaid > finalGrandTotal) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(422).json({ success: false, message: 'Total payment exceeds grand total.', errors: {} });
+    }
+    if (finalGrandTotal < oldSale.amountPaid && additionalPayment >= 0) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(422).json({ success: false, message: `Cannot reduce bill total below already paid amount (₹${oldSale.amountPaid}). Process a refund first.`, errors: {} });
+    }
+    const finalAmountDue = finalGrandTotal - finalAmountPaid;
+    let billStatus = 'saved';
+    if (finalAmountDue <= 0) billStatus = 'paid';
+    else if (finalAmountPaid > 0) billStatus = 'partially_paid';
+    else billStatus = 'due';
 
     // 1. Reverse old IMEI and stock changes
     const oldImeiList = oldSale.items.map(item => item.imei).filter(Boolean)
     if (oldImeiList.length > 0) {
-      await Imei.updateMany({ imeiNumber: { $in: oldImeiList } }, { $set: { status: 'available', soldAt: null } })
+      const revImei = await Imei.updateMany(
+        { imeiNumber: { $in: oldImeiList }, status: 'sold' }, 
+        { $set: { status: 'available', soldAt: null } }, 
+        { session }
+      )
+      if (revImei.modifiedCount !== oldImeiList.length) {
+         await session.abortTransaction()
+         session.endSession()
+         return res.status(422).json({ success: false, message: 'Cannot edit sale: Some items are no longer in sold state (possibly returned).', errors: {} })
+      }
     }
     for (const item of oldSale.items) {
-      if (item.productId) await Product.findByIdAndUpdate(item.productId, { $inc: { stock: item.qty || 1 } })
+      if (item.productId) await Product.findByIdAndUpdate(item.productId, { $inc: { stock: Math.abs(item.qty || 1) } }, { session })
     }
 
-    // 2. Apply new IMEI and stock changes
+    // 2. Apply new IMEI and stock changes atomically
     const newImeiList = items.map(item => item.imei).filter(Boolean)
     if (newImeiList.length > 0) {
-      await Imei.updateMany({ imeiNumber: { $in: newImeiList } }, { $set: { status: 'sold', soldAt: new Date() } })
+      const imeiResult = await Imei.updateMany(
+        { imeiNumber: { $in: newImeiList }, status: 'available' },
+        { $set: { status: 'sold', soldAt: new Date() } },
+        { session }
+      )
+      if (imeiResult.modifiedCount !== newImeiList.length) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(422).json({ success: false, message: 'One or more new IMEIs are not available.', errors: {} })
+      }
     }
     for (const item of items) {
-      if (item.productId) await Product.findByIdAndUpdate(item.productId, { $inc: { stock: -Math.abs(item.qty || 1) } })
+      if (item.productId) {
+        const qtyToDeduct = Math.abs(item.qty || 1)
+        const updatedProduct = await Product.findOneAndUpdate(
+          { _id: item.productId, stock: { $gte: qtyToDeduct } },
+          { $inc: { stock: -qtyToDeduct } },
+          { session, new: true }
+        )
+        if (!updatedProduct) {
+          await session.abortTransaction()
+          session.endSession()
+          return res.status(422).json({ success: false, message: `Insufficient stock for product: ${item.productName || 'Unknown'}`, errors: {} })
+        }
+      }
     }
 
     // 3. Update customer balance difference
-    const diff = grandTotal - oldSale.grandTotal
-    if (diff !== 0) {
-      await Customer.findByIdAndUpdate(oldSale.customerId, { $inc: { totalPurchases: diff } })
-      await Transaction.findOneAndUpdate({ referenceId: saleId, transactionType: 'sale' }, { amount: grandTotal })
+    const diff = finalGrandTotal - oldSale.grandTotal
+    if (diff !== 0 || additionalPayment !== 0) {
+      const balanceChange = diff - additionalPayment;
+      await Customer.findByIdAndUpdate(oldSale.customerId, { 
+        $inc: { totalPurchases: diff, balance: balanceChange } 
+      }, { session })
+      if (diff !== 0) {
+        await Transaction.findOneAndUpdate({ referenceId: saleId, transactionType: 'sale' }, { amount: finalGrandTotal }, { session })
+      }
+      if (additionalPayment > 0) {
+        await Transaction.create([{
+          transactionType: 'customer_payment',
+          referenceId: oldSale._id,
+          referenceNumber: oldSale.invoiceNumber,
+          description: `Additional Payment on Edit - Invoice ${oldSale.invoiceNumber}`,
+          amount: additionalPayment,
+          paymentMethod: req.body.paymentMode || oldSale.paymentMode || 'cash',
+          relatedEntity: oldSale.customerName,
+          transactionDate: new Date(),
+          createdBy: req.user?._id,
+        }], { session })
+      } else if (additionalPayment < 0) {
+        await Transaction.create([{
+          transactionType: 'refund',
+          referenceId: oldSale._id,
+          referenceNumber: oldSale.invoiceNumber,
+          description: `Payment Reversal on Edit - Invoice ${oldSale.invoiceNumber}`,
+          amount: Math.abs(additionalPayment),
+          paymentMethod: req.body.paymentMode || oldSale.paymentMode || 'cash',
+          relatedEntity: oldSale.customerName,
+          transactionDate: new Date(),
+          createdBy: req.user?._id,
+        }], { session })
+      }
     }
 
     // 4. Update sale fields
     oldSale.items = items
-    oldSale.subTotal = subTotal
-    oldSale.totalDiscount = totalDiscount
-    oldSale.totalTax = totalTax
-    oldSale.grandTotal = grandTotal
+    oldSale.subTotal = calcSubTotal
+    oldSale.totalDiscount = calcTotalDiscount
+    oldSale.totalTax = calcTotalTax
+    oldSale.grandTotal = finalGrandTotal
     oldSale.partyGst = partyGst
     if (req.body.customerName) oldSale.customerName = req.body.customerName
     if (req.body.phone) oldSale.phone = req.body.phone
     if (req.body.paymentMode) oldSale.paymentMode = req.body.paymentMode
     if (req.body.financeDetails) oldSale.financeDetails = req.body.financeDetails
-    if (req.body.warrantySaleAmount !== undefined) oldSale.warrantySaleAmount = req.body.warrantySaleAmount
+    oldSale.warrantySaleAmount = calcWarranty
     if (req.body.delayPaymentExpected !== undefined) oldSale.delayPaymentExpected = req.body.delayPaymentExpected
-    if (amountPaid !== undefined) oldSale.amountPaid = amountPaid
-    if (amountDue !== undefined) oldSale.amountDue = amountDue
+    oldSale.amountPaid = finalAmountPaid
+    oldSale.amountDue = finalAmountDue
+    oldSale.billStatus = billStatus
     if (promisedDate !== undefined) oldSale.promisedDate = promisedDate
-    await oldSale.save()
+    await oldSale.save({ session })
 
+    await session.commitTransaction()
+    session.endSession()
     res.json({ success: true, message: 'Sale updated successfully', data: oldSale })
   } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
     res.status(500).json({ success: false, message: error.message || 'Failed to update sale', errors: { error: error.message } })
   }
 }
 
 const cancel = async (req, res) => {
+  const session = await mongoose.startSession()
+  session.startTransaction()
   try {
     const saleId = req.params.id
-    const sale = await Sale.findById(saleId)
+    const sale = await Sale.findById(saleId).session(session)
     
-    if (!sale) return res.status(404).json({ success: false, message: 'Sale not found', errors: {} })
-    if (sale.status === 'cancelled') return res.status(422).json({ success: false, message: 'Sale is already cancelled', errors: {} })
+    if (!sale) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Sale not found', errors: {} })
+    }
+    if (sale.status === 'cancelled') {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(422).json({ success: false, message: 'Sale is already cancelled', errors: {} })
+    }
 
     // 1. Reverse IMEI status
     const imeiList = sale.items.map(item => item.imei).filter(Boolean)
     if (imeiList.length > 0) {
-      await Imei.updateMany({ imeiNumber: { $in: imeiList } }, { $set: { status: 'available', soldAt: null } })
+      const revImei = await Imei.updateMany(
+        { imeiNumber: { $in: imeiList }, status: 'sold' }, 
+        { $set: { status: 'available', soldAt: null } }, 
+        { session }
+      )
+      if (revImei.modifiedCount !== imeiList.length) {
+         await session.abortTransaction()
+         session.endSession()
+         return res.status(422).json({ success: false, message: 'Cannot cancel sale: Some items are no longer in sold state.', errors: {} })
+      }
     }
 
     // 2. Restore product stock
     for (const item of sale.items) {
-      if (item.productId) await Product.findByIdAndUpdate(item.productId, { $inc: { stock: item.qty || 1 } })
+      if (item.productId) await Product.findByIdAndUpdate(item.productId, { $inc: { stock: item.qty || 1 } }, { session })
     }
 
     // 3. Update customer balance
     if (sale.customerId) {
-      await Customer.findByIdAndUpdate(sale.customerId, { $inc: { totalPurchases: -sale.grandTotal } })
+      await Customer.findByIdAndUpdate(sale.customerId, { 
+        $inc: { totalPurchases: -sale.grandTotal, balance: -sale.grandTotal } 
+      }, { session })
     }
 
     // 4. Mark sale as cancelled
     sale.status = 'cancelled'
-    await sale.save()
+    sale.billStatus = 'cancelled'
+    await sale.save({ session })
 
-    // 5. Create transaction record for cancellation
-    await Transaction.create({
-      transactionType: 'refund',
-      referenceId: saleId,
-      referenceNumber: sale.invoiceNumber,
-      description: `Sale cancellation - ${sale.customerName}`,
-      amount: sale.grandTotal,
-      paymentMethod: sale.paymentMode === 'finance' ? 'credit' : (sale.paymentMode || 'cash'),
-      relatedEntity: sale.customerName,
-      transactionDate: new Date(),
-      createdBy: req.user?._id,
-    })
+    // 5. Create transaction record for cancellation (only if money was actually paid)
+    const cancelTxns = [];
+    if (sale.amountPaid > 0) {
+      cancelTxns.push({
+        transactionType: 'refund',
+        referenceId: saleId,
+        referenceNumber: sale.invoiceNumber,
+        description: `Customer payment refund due to cancellation - ${sale.customerName}`,
+        amount: sale.amountPaid,
+        paymentMethod: sale.paymentMode === 'finance' ? 'credit' : (sale.paymentMode || 'cash'),
+        relatedEntity: sale.customerName,
+        transactionDate: new Date(),
+        createdBy: req.user?._id,
+      });
+      // And we also update customer balance if we refunded them the money.
+      // If we refunded amountPaid, they owe us amountPaid more (balance += amountPaid).
+      if (sale.customerId) {
+        await Customer.findByIdAndUpdate(sale.customerId, { 
+          $inc: { balance: sale.amountPaid } 
+        }, { session });
+      }
+    }
+    
+    await Transaction.create(cancelTxns, { session })
 
+    await session.commitTransaction()
+    session.endSession()
     res.json({ success: true, message: 'Sale cancelled successfully', data: sale })
   } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
     res.status(500).json({ success: false, message: error.message || 'Failed to cancel sale', errors: { error: error.message } })
   }
 }
@@ -394,4 +661,87 @@ const getByInvoice = async (req, res) => {
   }
 };
 
-module.exports = { getByInvoice,  list, getOne, create, getPendingEmiNotifications, getBalanceSheet, update, cancel }
+const receivePayment = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const saleId = req.params.id;
+    const sale = await Sale.findById(saleId).session(session);
+    if (!sale) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ success: false, message: 'Sale not found', errors: {} });
+    }
+    if (sale.status === 'cancelled') {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(422).json({ success: false, message: 'Cannot receive payment for a cancelled bill', errors: {} });
+    }
+
+    if (req.body.amountPaid !== undefined) {
+      const newAmountPaid = Number(req.body.amountPaid);
+      const paymentDelta = newAmountPaid - (sale.amountPaid || 0);
+
+      if (newAmountPaid < 0) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(422).json({ success: false, message: 'Total payment cannot be less than zero.', errors: {} });
+      }
+      if (paymentDelta === 0) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(422).json({ success: false, message: 'Payment amount must be non-zero.', errors: {} });
+      }
+
+      const remainingDue = (sale.grandTotal || 0) - (sale.amountPaid || 0);
+      if (paymentDelta > remainingDue) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(422).json({ success: false, message: `Payment cannot exceed remaining due (₹${remainingDue}).`, errors: {} });
+      }
+
+      sale.amountPaid = newAmountPaid;
+      sale.amountDue = (sale.grandTotal || 0) - sale.amountPaid;
+
+      if (sale.amountDue <= 0) {
+        sale.billStatus = 'paid';
+        sale.amountDue = 0;
+      } else if (sale.amountPaid > 0) {
+        sale.billStatus = 'partially_paid';
+      } else {
+        sale.billStatus = 'due';
+      }
+
+      await Transaction.create([{
+        transactionType: paymentDelta > 0 ? 'customer_payment' : 'refund',
+        referenceId: sale._id,
+        referenceNumber: sale.invoiceNumber,
+        description: paymentDelta > 0 ? `Payment received for invoice ${sale.invoiceNumber}` : `Payment reversal for invoice ${sale.invoiceNumber}`,
+        amount: Math.abs(paymentDelta),
+        paymentMethod: req.body.paymentMode || 'cash',
+        relatedEntity: sale.customerName,
+        transactionDate: new Date(),
+        createdBy: req.user?._id,
+      }], { session });
+
+      if (sale.customerId) {
+        const customer = await Customer.findById(sale.customerId).session(session);
+        if (customer) {
+          customer.balance = (customer.balance || 0) - paymentDelta;
+          await customer.save({ session });
+        }
+      }
+    }
+
+    await sale.save({ session });
+    await session.commitTransaction();
+    session.endSession();
+    res.json({ success: true, message: 'Payment received successfully', data: sale });
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    res.status(500).json({ success: false, message: error.message || 'Failed to receive payment', errors: { error: error.message } });
+  }
+};
+
+module.exports = { getByInvoice, list, getOne, create, getPendingEmiNotifications, getBalanceSheet, update, cancel, receivePayment }

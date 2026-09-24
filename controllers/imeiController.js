@@ -31,6 +31,9 @@ const create = async (req, res) => {
 
   const imeis = await Imei.insertMany(numbers.map((number) => ({ productId, imeiNumber: number, status, remarks })))
 
+  // Also increase the product stock for the newly added IMEIs
+  await Product.findByIdAndUpdate(productId, { $inc: { stock: numbers.length } })
+
   // Adjust supplier ledger balance if supplier is linked
   if (product.supplierId) {
     const Supplier = require('../models/Supplier')
@@ -49,13 +52,44 @@ const create = async (req, res) => {
 const update = async (req, res) => {
   const existing = await Imei.findById(req.params.id)
   if (!existing || existing.status === 'archived') return res.status(404).json({ success: false, message: 'IMEI not found', errors: {} })
-  if (existing.status === 'sold' && req.body.status && req.body.status !== 'sold') {
-    return res.status(422).json({ success: false, message: 'Sold IMEI cannot be made available again from inventory', errors: {} })
+  
+  const oldStatus = existing.status;
+  const newStatus = req.body.status;
+  
+  if (newStatus && oldStatus !== newStatus) {
+    const validTransitions = {
+      'available': ['reserved', 'sold', 'damaged', 'lost', 'archived', 'returned'],
+      'reserved': ['sold', 'available', 'archived'],
+      'sold': ['returned'],
+      'returned': ['available', 'damaged', 'archived'],
+      'damaged': ['archived'],
+      'lost': ['archived'],
+      'archived': []
+    };
+    
+    // In Maa Veshno logic, company returns change available -> returned. 
+    // Sales change available -> sold or reserved -> sold.
+    // Sale cancellations might go sold -> returned or sold -> available. 
+    // The prompt says "sold -> returned", so we allow it.
+    
+    const allowed = validTransitions[oldStatus] || [];
+    if (!allowed.includes(newStatus)) {
+      return res.status(422).json({ success: false, message: `Invalid state transition from ${oldStatus} to ${newStatus}`, errors: {} })
+    }
   }
-  const allowed = ['status', 'remarks']
-  for (const key of allowed) if (req.body[key] !== undefined) existing[key] = req.body[key]
+  
+  const allowedParams = ['status', 'remarks']
+  for (const key of allowedParams) if (req.body[key] !== undefined) existing[key] = req.body[key]
   if (existing.status === 'sold' && !existing.soldAt) existing.soldAt = new Date()
   await existing.save()
+  
+  // If status changed from/to available, update product stock
+  if (oldStatus === 'available' && existing.status !== 'available') {
+    await Product.findByIdAndUpdate(existing.productId, { $inc: { stock: -1 } })
+  } else if (oldStatus !== 'available' && existing.status === 'available') {
+    await Product.findByIdAndUpdate(existing.productId, { $inc: { stock: 1 } })
+  }
+  
   res.json({ success: true, message: 'IMEI updated', data: existing })
 }
 
@@ -63,8 +97,15 @@ const remove = async (req, res) => {
   const imei = await Imei.findById(req.params.id)
   if (!imei || imei.status === 'archived') return res.status(404).json({ success: false, message: 'IMEI not found', errors: {} })
   if (imei.status === 'sold') return res.status(422).json({ success: false, message: 'Sold IMEI cannot be deleted', errors: {} })
+  
+  const oldStatus = imei.status;
   imei.status = 'archived'
   await imei.save()
+
+  // If the IMEI was available before archiving, decrease product stock
+  if (oldStatus === 'available') {
+    await Product.findByIdAndUpdate(imei.productId, { $inc: { stock: -1 } })
+  }
 
   // Adjust supplier ledger balance if supplier is linked
   const product = await Product.findById(imei.productId)
