@@ -63,7 +63,8 @@ const login = async (req, res) => {
 
   user.lastLogin = new Date()
   await user.save()
-  const token = jwt.sign({ userId: user._id, role: user.role, permissions: user.permissions }, process.env.JWT_SECRET, { expiresIn: '7d' })
+  const secret = process.env.JWT_SECRET || 'MaaVeshno_Fallback_Secret_Key_2026'
+  const token = jwt.sign({ userId: user._id, role: user.role, permissions: user.permissions }, secret, { expiresIn: '7d' })
   return res.json({ success: true, message: 'Login successful', data: { user: publicUser(user), token } })
 }
 
