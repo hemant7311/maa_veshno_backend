@@ -30,16 +30,16 @@ const getReturnById = async (req, res) => {
 }
 
 const createReturn = async (req, res) => {
-  const session = await mongoose.startSession()
-  session.startTransaction()
-  try {
-    const { supplier, supplierName, product, productName, imei, imeis, quantity, returnDate, reason, notes, purchasePrice } = req.body
-
-    if (!product || !supplierName) {
-      await session.abortTransaction()
-      session.endSession()
-      return res.status(422).json({ success: false, message: 'Product and supplier name are required', errors: {} })
-    }
+    const session = await mongoose.startSession()
+    session.startTransaction()
+    try {
+      const { supplier, supplierName, product, productName, imei, imeis, quantity, returnDate, reason, notes, purchasePrice } = req.body
+  
+      if (!product || (!supplier && !supplierName)) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(422).json({ success: false, message: 'Product and supplier name are required', errors: {} })
+      }
     if (!quantity || quantity <= 0) {
       await session.abortTransaction()
       session.endSession()
