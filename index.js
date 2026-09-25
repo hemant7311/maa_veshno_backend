@@ -1,4 +1,6 @@
 require('dotenv').config()
+// Maa Veshno Mobile Shop ERP - Backend Server v1.0.1
+// Updated: 2026-09-25
 const express = require('express')
 const cors = require('cors')
 const connectDatabase = require('./config/database')
