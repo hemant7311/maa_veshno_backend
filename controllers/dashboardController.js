@@ -107,6 +107,17 @@ const summary = async (req, res) => {
             unitCost = productNameCostMap.get(String(item.productName).toLowerCase().trim()) || 0
           }
 
+          const unitSelling = qty > 0 ? (itemNetSelling / qty) : itemNetSelling
+          if (unitSelling > 0 && unitCost > unitSelling * 2.5) {
+            if (unitCost === 100000 && (unitSelling >= 10000 && unitSelling <= 15000)) {
+              unitCost = 10000
+            } else if (unitCost / 10 > 0 && (unitCost / 10) <= unitSelling) {
+              unitCost = Math.round(unitCost / 10)
+            } else {
+              unitCost = Math.min(unitCost, unitSelling)
+            }
+          }
+
           const lineCost = unitCost * qty
           const lineGross = itemNetSelling - lineCost
 
