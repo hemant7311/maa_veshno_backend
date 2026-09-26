@@ -24,7 +24,8 @@ const summary = async (req, res) => {
       todayPurchases,
       todayExpenses,
       allExpenses,
-      todayCompanyReturns
+      todayCompanyReturns,
+      allProducts
     ] = await Promise.all([
       Product.countDocuments({ status: 'active' }),
       Customer.countDocuments({ status: 'active' }),
@@ -47,48 +48,63 @@ const summary = async (req, res) => {
         ]
       }).lean(),
       Expense.find().sort({ date: -1, createdAt: -1 }).lean(),
-      CompanyReturn.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: { $ne: 'cancelled' } }).lean()
+      CompanyReturn.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: { $ne: 'cancelled' } }).lean(),
+      Product.find().select('_id purchasePrice costPrice').lean()
     ])
 
-    // Process Overall Sales Data
-    let totalGrossProfit = 0
-    let totalCashProfit = 0
-    let totalUpiProfit = 0
-    let totalSales = 0
+    const productCostMap = new Map(allProducts.map(p => [String(p._id), p.purchasePrice || p.costPrice || 0]))
 
-    allSales.forEach(sale => {
-      let saleProfit = 0
-      sale.items.forEach(item => {
-        saleProfit += (item.total - ((item.purchasePrice || 0) * item.qty))
+    // Helper to calculate revenue, cost, and gross profit for a list of sales
+    const calculateSalesMetrics = (salesList) => {
+      let revenue = 0
+      let cost = 0
+      let grossProfit = 0
+      let grossCashProfit = 0
+      let grossUpiProfit = 0
+      let grossCardProfit = 0
+      let grossFinanceProfit = 0
+
+      salesList.forEach(sale => {
+        const saleRevenue = sale.grandTotal || 0
+        revenue += saleRevenue
+
+        let saleCost = 0
+        let saleGrossProfit = 0
+
+        sale.items.forEach(item => {
+          const qty = item.qty || 1
+          const itemNetSelling = item.total !== undefined ? item.total : (((item.price || 0) * qty) - (item.discount || 0))
+          const unitCost = (item.purchasePrice !== undefined && item.purchasePrice !== 0) 
+            ? item.purchasePrice 
+            : (item.productId ? (productCostMap.get(String(item.productId)) || 0) : 0)
+          const lineCost = unitCost * qty
+          const lineGross = itemNetSelling - lineCost
+
+          saleCost += lineCost
+          saleGrossProfit += lineGross
+        })
+
+        cost += saleCost
+        grossProfit += saleGrossProfit
+
+        if (sale.paymentMode === 'cash') grossCashProfit += saleGrossProfit
+        else if (sale.paymentMode === 'upi') grossUpiProfit += saleGrossProfit
+        else if (sale.paymentMode === 'card') grossCardProfit += saleGrossProfit
+        else if (sale.paymentMode === 'finance') grossFinanceProfit += saleGrossProfit
       })
-      totalGrossProfit += saleProfit
-      totalSales += (sale.grandTotal || 0)
-      if (sale.paymentMode === 'cash') totalCashProfit += saleProfit
-      else if (sale.paymentMode === 'upi') totalUpiProfit += saleProfit
-    })
 
-    const totalExpenseAmount = allExpenses.reduce((sum, exp) => sum + (exp.amount || 0), 0)
-    const netTotalProfit = totalGrossProfit - totalExpenseAmount
+      return { revenue, cost, grossProfit, grossCashProfit, grossUpiProfit, grossCardProfit, grossFinanceProfit }
+    }
 
-    // Process Today's Sales Data (authoritative for specified India business date)
-    let todayGrossProfit = 0
-    let todayCashProfit = 0
-    let todayUpiProfit = 0
-    let todayTotalSales = 0
+    // Process Overall All-Time Sales Accounting
+    const overall = calculateSalesMetrics(allSales)
+    const totalExpenses = allExpenses.reduce((sum, exp) => sum + (exp.amount || 0), 0)
+    const netTotalProfit = overall.grossProfit - totalExpenses
 
-    todaySales.forEach(sale => {
-      let saleProfit = 0
-      sale.items.forEach(item => {
-        saleProfit += (item.total - ((item.purchasePrice || 0) * item.qty))
-      })
-      todayGrossProfit += saleProfit
-      todayTotalSales += (sale.grandTotal || 0)
-      if (sale.paymentMode === 'cash') todayCashProfit += saleProfit
-      else if (sale.paymentMode === 'upi') todayUpiProfit += saleProfit
-    })
-
+    // Process Today's Sales Accounting
+    const today = calculateSalesMetrics(todaySales)
     const todayExpenseAmount = todayExpenses.reduce((sum, exp) => sum + (exp.amount || 0), 0)
-    const todayNetProfit = todayGrossProfit - todayExpenseAmount
+    const todayNetProfit = today.grossProfit - todayExpenseAmount
 
     // Calculate Today's Stock In from purchases
     let todayStockIn = 0
@@ -131,15 +147,40 @@ const summary = async (req, res) => {
         saleValue: inventorySummary[0]?.saleValue || 0,
         potentialProfit: (inventorySummary[0]?.saleValue || 0) - (inventorySummary[0]?.purchaseValue || 0),
         lowStock,
+        
+        // Authoritative Accounting Fields
+        totalSales: Math.round(overall.revenue),
+        totalCost: Math.round(overall.cost),
+        totalGrossProfit: Math.round(overall.grossProfit),
+        totalExpenses: Math.round(totalExpenses),
+        totalNetProfit: Math.round(netTotalProfit),
         totalProfit: Math.round(netTotalProfit),
-        todayProfit: Math.round(todayNetProfit),
+
+        // Gross Profit by Payment Mode (All-Time)
+        grossCashProfit: Math.round(overall.grossCashProfit),
+        grossUpiProfit: Math.round(overall.grossUpiProfit),
+        grossCardProfit: Math.round(overall.grossCardProfit),
+        grossFinanceProfit: Math.round(overall.grossFinanceProfit),
+        totalCashProfit: Math.round(overall.grossCashProfit),
+        totalUpiProfit: Math.round(overall.grossUpiProfit),
+
+        // Today Accounting Fields
+        todayTotalSales: Math.round(today.revenue),
+        todayTotalCost: Math.round(today.cost),
+        todayGrossProfit: Math.round(today.grossProfit),
         todayExpense: Math.round(todayExpenseAmount),
-        totalCashProfit: Math.round(totalCashProfit - totalExpenseAmount),
-        totalUpiProfit: Math.round(totalUpiProfit),
-        todayCashProfit: Math.round(todayCashProfit - todayExpenseAmount),
-        todayUpiProfit: Math.round(todayUpiProfit),
-        todayTotalSales: Math.round(todayTotalSales),
-        totalSales: Math.round(totalSales),
+        todayExpenses: Math.round(todayExpenseAmount),
+        todayNetProfit: Math.round(todayNetProfit),
+        todayProfit: Math.round(todayNetProfit),
+
+        // Gross Profit by Payment Mode (Today)
+        todayGrossCashProfit: Math.round(today.grossCashProfit),
+        todayGrossUpiProfit: Math.round(today.grossUpiProfit),
+        todayGrossCardProfit: Math.round(today.grossCardProfit),
+        todayGrossFinanceProfit: Math.round(today.grossFinanceProfit),
+        todayCashProfit: Math.round(today.grossCashProfit),
+        todayUpiProfit: Math.round(today.grossUpiProfit),
+
         todayStockIn,
         todayReturnsCount,
         todayReturnsAmount,
