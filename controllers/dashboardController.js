@@ -53,6 +53,7 @@ const summary = async (req, res) => {
     ])
 
     const productCostMap = new Map(allProducts.map(p => [String(p._id), p.purchasePrice || p.costPrice || 0]))
+    const productNameCostMap = new Map(allProducts.map(p => [p.productName.toLowerCase().trim(), p.purchasePrice || p.costPrice || 0]))
 
     // Helper to calculate revenue, cost, and gross profit for a list of sales
     const calculateSalesMetrics = (salesList) => {
@@ -74,9 +75,15 @@ const summary = async (req, res) => {
         sale.items.forEach(item => {
           const qty = item.qty || 1
           const itemNetSelling = item.total !== undefined ? item.total : (((item.price || 0) * qty) - (item.discount || 0))
-          const unitCost = (item.purchasePrice !== undefined && item.purchasePrice !== 0) 
-            ? item.purchasePrice 
-            : (item.productId ? (productCostMap.get(String(item.productId)) || 0) : 0)
+          
+          let unitCost = (item.purchasePrice !== undefined && item.purchasePrice > 0) ? item.purchasePrice : 0
+          if (!unitCost && item.productId) {
+            unitCost = productCostMap.get(String(item.productId)) || 0
+          }
+          if (!unitCost && item.productName) {
+            unitCost = productNameCostMap.get(item.productName.toLowerCase().trim()) || 0
+          }
+
           const lineCost = unitCost * qty
           const lineGross = itemNetSelling - lineCost
 
@@ -154,7 +161,9 @@ const summary = async (req, res) => {
         totalGrossProfit: Math.round(overall.grossProfit),
         totalExpenses: Math.round(totalExpenses),
         totalNetProfit: Math.round(netTotalProfit),
-        totalProfit: Math.round(netTotalProfit),
+        
+        // TOTAL PROFIT CARD = TOTAL GROSS PROFIT (PART 1)
+        totalProfit: Math.round(overall.grossProfit),
 
         // Gross Profit by Payment Mode (All-Time)
         grossCashProfit: Math.round(overall.grossCashProfit),
@@ -162,7 +171,7 @@ const summary = async (req, res) => {
         grossCardProfit: Math.round(overall.grossCardProfit),
         grossFinanceProfit: Math.round(overall.grossFinanceProfit),
         totalCashProfit: Math.round(overall.grossCashProfit),
-        totalUpiProfit: Math.round(overall.grossUpiProfit),
+        totalUpiProfit: Math.round(overall.grossUpiProfit + overall.grossCardProfit + overall.grossFinanceProfit),
 
         // Today Accounting Fields
         todayTotalSales: Math.round(today.revenue),
@@ -171,7 +180,9 @@ const summary = async (req, res) => {
         todayExpense: Math.round(todayExpenseAmount),
         todayExpenses: Math.round(todayExpenseAmount),
         todayNetProfit: Math.round(todayNetProfit),
-        todayProfit: Math.round(todayNetProfit),
+        
+        // TODAY'S PROFIT CARD = TODAY GROSS PROFIT (PART 2)
+        todayProfit: Math.round(today.grossProfit),
 
         // Gross Profit by Payment Mode (Today)
         todayGrossCashProfit: Math.round(today.grossCashProfit),
@@ -179,7 +190,7 @@ const summary = async (req, res) => {
         todayGrossCardProfit: Math.round(today.grossCardProfit),
         todayGrossFinanceProfit: Math.round(today.grossFinanceProfit),
         todayCashProfit: Math.round(today.grossCashProfit),
-        todayUpiProfit: Math.round(today.grossUpiProfit),
+        todayUpiProfit: Math.round(today.grossUpiProfit + today.grossCardProfit + today.grossFinanceProfit),
 
         todayStockIn,
         todayReturnsCount,
