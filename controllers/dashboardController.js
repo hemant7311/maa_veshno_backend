@@ -40,8 +40,14 @@ const summary = async (req, res) => {
       ]).catch(() => []),
       Sale.find({ status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean().catch(() => []),
       Sale.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean().catch(() => []),
-      Purchase.find({ status: 'completed' }).lean().catch(() => []),
-      Purchase.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: 'completed' }).lean().catch(() => []),
+      Purchase.find({ status: { $ne: 'cancelled' } }).lean().catch(() => []),
+      Purchase.find({
+        $or: [
+          { date: { $gte: dayStart, $lte: dayEnd } },
+          { createdAt: { $gte: dayStart, $lte: dayEnd } }
+        ],
+        status: { $ne: 'cancelled' }
+      }).lean().catch(() => []),
       Expense.find({
         $or: [
           { date: { $gte: dayStart, $lte: dayEnd } },
@@ -49,8 +55,14 @@ const summary = async (req, res) => {
         ]
       }).sort({ createdAt: -1 }).lean().catch(() => []),
       Expense.find().sort({ date: -1, createdAt: -1 }).lean().catch(() => []),
-      CompanyReturn.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean().catch(() => []),
-      CompanyReturn.find({ status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean().catch(() => []),
+      CompanyReturn.find({
+        $or: [
+          { returnDate: { $gte: dayStart, $lte: dayEnd } },
+          { createdAt: { $gte: dayStart, $lte: dayEnd } }
+        ],
+        status: { $ne: 'rejected' }
+      }).sort({ returnDate: -1, createdAt: -1 }).lean().catch(() => []),
+      CompanyReturn.find({ status: { $ne: 'rejected' } }).sort({ returnDate: -1, createdAt: -1 }).lean().catch(() => []),
       Product.find().select('_id productName purchasePrice costPrice brand variant categoryName').lean().catch(() => [])
     ])
 
