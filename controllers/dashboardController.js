@@ -4,14 +4,14 @@ const Imei = require('../models/Imei')
 const Sale = require('../models/Sale')
 const Purchase = require('../models/Purchase')
 const Expense = require('../models/Expense')
-const Transaction = require('../models/Transaction')
+const CompanyReturn = require('../models/CompanyReturn')
+const { getIndiaDayBounds, getIndiaFYBounds } = require('../utils/dateUtils')
 
 const summary = async (req, res) => {
   try {
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const tomorrow = new Date(today)
-    tomorrow.setDate(tomorrow.getDate() + 1)
+    const targetDate = req.query.date || new Date()
+    const { start: dayStart, end: dayEnd, dateStr } = getIndiaDayBounds(targetDate)
+    const { start: fyStart, end: fyEnd } = getIndiaFYBounds(targetDate)
 
     const [
       productCount,
@@ -21,8 +21,10 @@ const summary = async (req, res) => {
       allSales,
       todaySales,
       allPurchases,
+      todayPurchases,
       todayExpenses,
-      allExpenses
+      allExpenses,
+      todayCompanyReturns
     ] = await Promise.all([
       Product.countDocuments({ status: 'active' }),
       Customer.countDocuments({ status: 'active' }),
@@ -35,13 +37,20 @@ const summary = async (req, res) => {
         { $group: { _id: null, stock: { $sum: 1 }, purchaseValue: { $sum: '$product.purchasePrice' }, saleValue: { $sum: '$product.salePrice' } } },
       ]),
       Sale.find({ status: { $ne: 'cancelled' } }).lean(),
-      Sale.find({ createdAt: { $gte: today, $lt: tomorrow }, status: { $ne: 'cancelled' } }).lean(),
-      Purchase.find({ createdAt: { $gte: today, $lt: tomorrow }, status: 'completed' }).lean(),
-      Expense.find({ date: { $gte: today, $lt: tomorrow } }).lean(),
-      Expense.find().sort({ date: -1, createdAt: -1 }).lean()
+      Sale.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: { $ne: 'cancelled' } }).lean(),
+      Purchase.find({ status: 'completed' }).lean(),
+      Purchase.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: 'completed' }).lean(),
+      Expense.find({
+        $or: [
+          { date: { $gte: dayStart, $lte: dayEnd } },
+          { createdAt: { $gte: dayStart, $lte: dayEnd } }
+        ]
+      }).lean(),
+      Expense.find().sort({ date: -1, createdAt: -1 }).lean(),
+      CompanyReturn.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: { $ne: 'cancelled' } }).lean()
     ])
 
-    // Process Sales Data - Total
+    // Process Overall Sales Data
     let totalGrossProfit = 0
     let totalCashProfit = 0
     let totalUpiProfit = 0
@@ -53,15 +62,15 @@ const summary = async (req, res) => {
         saleProfit += (item.total - ((item.purchasePrice || 0) * item.qty))
       })
       totalGrossProfit += saleProfit
-      totalSales += sale.grandTotal
+      totalSales += (sale.grandTotal || 0)
       if (sale.paymentMode === 'cash') totalCashProfit += saleProfit
-      if (sale.paymentMode === 'upi') totalUpiProfit += saleProfit
+      else if (sale.paymentMode === 'upi') totalUpiProfit += saleProfit
     })
 
     const totalExpenseAmount = allExpenses.reduce((sum, exp) => sum + (exp.amount || 0), 0)
     const netTotalProfit = totalGrossProfit - totalExpenseAmount
 
-    // Process Today's Sales Data
+    // Process Today's Sales Data (authoritative for specified India business date)
     let todayGrossProfit = 0
     let todayCashProfit = 0
     let todayUpiProfit = 0
@@ -73,9 +82,9 @@ const summary = async (req, res) => {
         saleProfit += (item.total - ((item.purchasePrice || 0) * item.qty))
       })
       todayGrossProfit += saleProfit
-      todayTotalSales += sale.grandTotal
+      todayTotalSales += (sale.grandTotal || 0)
       if (sale.paymentMode === 'cash') todayCashProfit += saleProfit
-      if (sale.paymentMode === 'upi') todayUpiProfit += saleProfit
+      else if (sale.paymentMode === 'upi') todayUpiProfit += saleProfit
     })
 
     const todayExpenseAmount = todayExpenses.reduce((sum, exp) => sum + (exp.amount || 0), 0)
@@ -83,24 +92,25 @@ const summary = async (req, res) => {
 
     // Calculate Today's Stock In from purchases
     let todayStockIn = 0
-    allPurchases.forEach(purchase => {
+    todayPurchases.forEach(purchase => {
       purchase.items.forEach(item => {
         todayStockIn += item.quantity || 0
       })
     })
 
-    const recentSales = []
-    allSales.slice(0, 15).forEach(sale => {
-      recentSales.push({
-        id: sale.invoiceNumber,
-        customer: sale.customerName,
-        phone: sale.phone,
-        date: sale.createdAt,
-        amount: sale.grandTotal,
-        mode: sale.paymentMode,
-        products: sale.items.map(i => i.productName).join(', ')
-      })
-    })
+    // Calculate Today's Returns
+    const todayReturnsCount = todayCompanyReturns.reduce((sum, cr) => sum + (cr.quantity || 1), 0)
+    const todayReturnsAmount = todayCompanyReturns.reduce((sum, cr) => sum + ((cr.purchasePrice || 0) * (cr.quantity || 1)), 0)
+
+    const recentSales = allSales.slice(0, 15).map(sale => ({
+      id: sale.invoiceNumber,
+      customer: sale.customerName,
+      phone: sale.phone,
+      date: sale.createdAt,
+      amount: sale.grandTotal,
+      mode: sale.paymentMode,
+      products: sale.items.map(i => i.productName).join(', ')
+    }))
 
     const stockMap = new Map(stockByProduct.map((item) => [String(item._id), item.stock]))
     const activeProducts = await Product.find({ status: 'active' }).select('productName minStock')
@@ -131,7 +141,9 @@ const summary = async (req, res) => {
         todayTotalSales: Math.round(todayTotalSales),
         totalSales: Math.round(totalSales),
         todayStockIn,
-        recentSales: recentSales,
+        todayReturnsCount,
+        todayReturnsAmount,
+        recentSales,
         recentExpenses: allExpenses.slice(0, 20)
       },
     })
