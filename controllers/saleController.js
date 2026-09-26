@@ -4,6 +4,8 @@ const Imei = require('../models/Imei')
 const Product = require('../models/Product')
 const Transaction = require('../models/Transaction')
 const mongoose = require('mongoose')
+const fs = require('fs')
+const path = require('path')
 const { getNextSequence } = require('../utils/counter')
 const { getFinancialYear } = require('../utils/financialYear')
 const { normalizePaymentMethod } = require('../utils/paymentMapper')
@@ -703,8 +705,40 @@ const saveBillImage = async (req, res) => {
     if (!billImageUrl) {
       return res.status(422).json({ success: false, message: 'billImageUrl is required', errors: {} })
     }
-    const sale = await Sale.findByIdAndUpdate(saleId, { billImageUrl }, { new: true })
+
+    const sale = await Sale.findById(saleId)
     if (!sale) return res.status(404).json({ success: false, message: 'Sale not found', errors: {} })
+
+    let finalUrl = billImageUrl
+
+    if (billImageUrl.startsWith('data:image/')) {
+      const matches = billImageUrl.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/)
+      if (matches) {
+        const ext = matches[1] === 'jpeg' ? 'jpg' : matches[1]
+        const buffer = Buffer.from(matches[2], 'base64')
+        const billsDir = path.join(__dirname, '../uploads/bills')
+        if (!fs.existsSync(billsDir)) {
+          fs.mkdirSync(billsDir, { recursive: true })
+        }
+        const fileName = `bill_${sale._id}_${Date.now()}.${ext}`
+        const filePath = path.join(billsDir, fileName)
+        fs.writeFileSync(filePath, buffer)
+        finalUrl = `/uploads/bills/${fileName}`
+
+        // Remove old bill image file if it exists and was stored in uploads/bills
+        if (sale.billImageUrl && sale.billImageUrl.startsWith('/uploads/bills/')) {
+          const oldFileName = path.basename(sale.billImageUrl)
+          const oldFilePath = path.join(billsDir, oldFileName)
+          if (fs.existsSync(oldFilePath)) {
+            try { fs.unlinkSync(oldFilePath) } catch (e) { console.warn('Failed to remove old bill file:', e.message) }
+          }
+        }
+      }
+    }
+
+    sale.billImageUrl = finalUrl
+    await sale.save()
+
     res.json({ success: true, message: 'Bill image saved successfully', data: sale })
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to save bill image', errors: { error: error.message } })
