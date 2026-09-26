@@ -4,12 +4,13 @@ const Imei = require('../models/Imei')
 const Supplier = require('../models/Supplier')
 const Transaction = require('../models/Transaction')
 const mongoose = require('mongoose')
+const { normalizePaymentMethod } = require('../utils/paymentMapper')
 
 const getAllReturns = async (req, res) => {
   try {
     const returns = await CompanyReturn.find()
       .populate('supplier', 'name type shopName phone')
-      .populate('product', 'productName brand model sku barcode costPrice')
+      .populate('product', 'productName brand model sku barcode purchasePrice salePrice stock')
       .sort({ createdAt: -1 })
     res.json({ success: true, message: 'Company returns loaded', data: returns })
   } catch (error) {
@@ -21,7 +22,7 @@ const getReturnById = async (req, res) => {
   try {
     const companyReturn = await CompanyReturn.findById(req.params.id)
       .populate('supplier', 'name type shopName phone')
-      .populate('product', 'productName brand model sku barcode costPrice')
+      .populate('product', 'productName brand model sku barcode purchasePrice salePrice stock')
     if (!companyReturn) return res.status(404).json({ success: false, message: 'Company return not found', errors: {} })
     res.json({ success: true, message: 'Company return loaded', data: companyReturn })
   } catch (error) {
@@ -30,121 +31,180 @@ const getReturnById = async (req, res) => {
 }
 
 const createReturn = async (req, res) => {
-    const session = await mongoose.startSession()
-    session.startTransaction()
-    try {
-      const { supplier, supplierName, product, productName, imei, imeis, quantity, returnDate, reason, notes, purchasePrice } = req.body
-  
-      if (!product || (!supplier && !supplierName)) {
-        await session.abortTransaction()
-        session.endSession()
-        return res.status(422).json({ success: false, message: 'Product and supplier name are required', errors: {} })
-      }
-    if (!quantity || quantity <= 0) {
+  const session = await mongoose.startSession()
+  session.startTransaction()
+  try {
+    // Canonical payload fields with backward-compatibility fallbacks
+    const supplierId = req.body.supplier || req.body.supplierId
+    const productId = req.body.product || req.body.productId
+    const rawQuantity = req.body.quantity
+    const returnDate = req.body.returnDate
+    const reason = req.body.reason || ''
+    const notes = req.body.notes || ''
+    
+    // Process IMEIs (supporting array or string fallbacks)
+    const rawImeis = req.body.imeis || req.body.imeiNumbers || []
+    let allImeis = Array.isArray(rawImeis) ? [...rawImeis] : []
+    if (req.body.imei && !allImeis.includes(req.body.imei)) {
+      allImeis.unshift(req.body.imei)
+    }
+    // Clean and deduplicate IMEI strings
+    allImeis = [...new Set(allImeis.map(i => String(i || '').trim()).filter(Boolean))]
+
+    // 1. Basic Field Validations
+    if (!supplierId) {
       await session.abortTransaction()
       session.endSession()
-      return res.status(422).json({ success: false, message: 'Valid quantity is required', errors: {} })
+      return res.status(422).json({ success: false, message: 'Supplier is required', errors: {} })
+    }
+    if (!productId) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(422).json({ success: false, message: 'Product is required', errors: {} })
     }
 
-    const productDoc = await Product.findById(product).session(session)
+    // 2. Fetch & Validate Supplier from DB
+    const supplierDoc = await Supplier.findById(supplierId).session(session)
+    if (!supplierDoc) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Selected supplier does not exist', errors: {} })
+    }
+
+    // 3. Fetch & Validate Product from DB
+    const productDoc = await Product.findById(productId).session(session)
     if (!productDoc) {
       await session.abortTransaction()
       session.endSession()
-      return res.status(404).json({ success: false, message: 'Product not found', errors: {} })
+      return res.status(404).json({ success: false, message: 'Selected product does not exist', errors: {} })
     }
 
-    const allImeis = []
-    if (imei) allImeis.push(imei)
-    if (imeis && Array.isArray(imeis)) allImeis.push(...imeis)
+    // Determine quantity
+    let quantity = Number(rawQuantity)
+    if (isNaN(quantity) || quantity <= 0) {
+      if (allImeis.length > 0) {
+        quantity = allImeis.length
+      } else {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(422).json({ success: false, message: 'Valid positive quantity is required', errors: {} })
+      }
+    }
 
+    // 4. Validate IMEI requirement and matching
     if (allImeis.length > 0) {
       if (allImeis.length !== quantity) {
         await session.abortTransaction()
         session.endSession()
-        return res.status(422).json({ success: false, message: 'Quantity must match number of IMEIs provided', errors: {} })
+        return res.status(422).json({ success: false, message: `Quantity (${quantity}) must match the number of IMEIs provided (${allImeis.length})`, errors: {} })
       }
+
+      // Check all IMEIs exist in database, belong to this product, and are eligible for return (available/sellable)
+      const imeiDocs = await Imei.find({ imeiNumber: { $in: allImeis } }).session(session)
+      if (imeiDocs.length !== allImeis.length) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(422).json({ success: false, message: 'One or more invalid IMEI numbers provided', errors: {} })
+      }
+
+      for (const imeiDoc of imeiDocs) {
+        if (String(imeiDoc.productId) !== String(productDoc._id)) {
+          await session.abortTransaction()
+          session.endSession()
+          return res.status(422).json({ success: false, message: `IMEI ${imeiDoc.imeiNumber} does not belong to the selected product`, errors: {} })
+        }
+        const statusLower = String(imeiDoc.status || '').toLowerCase()
+        if (statusLower !== 'available' && statusLower !== 'sellable') {
+          await session.abortTransaction()
+          session.endSession()
+          return res.status(422).json({ success: false, message: `IMEI ${imeiDoc.imeiNumber} is not available for return (current status: ${imeiDoc.status})`, errors: {} })
+        }
+      }
+
+      // Atomically update IMEIs to returned
       const imeiResult = await Imei.updateMany(
-        { imeiNumber: { $in: allImeis }, status: 'available' },
+        { imeiNumber: { $in: allImeis }, status: { $in: ['available', 'sellable'] } },
         { $set: { status: 'returned' } },
         { session }
       )
       if (imeiResult.modifiedCount !== allImeis.length) {
         await session.abortTransaction()
         session.endSession()
-        return res.status(422).json({ success: false, message: 'One or more IMEIs are not available.', errors: {} })
+        return res.status(422).json({ success: false, message: 'Could not update IMEI statuses. Some IMEIs may have changed status concurrently.', errors: {} })
       }
     }
 
-    let supplierDoc = null
-    if (supplier) supplierDoc = await Supplier.findById(supplier).session(session)
-
-    const returnData = [{
-      supplier: supplierDoc ? supplierDoc._id : null,
-      supplierName: supplierDoc ? supplierDoc.name : supplierName,
-      product: productDoc._id,
-      productName: productDoc.productName || productName,
-      brand: productDoc.brand || '',
-      model: productDoc.model || '',
-      purchasePrice: purchasePrice || productDoc.purchasePrice || 0,
-      status: 'completed',
-      imei: imei || (allImeis.length > 0 ? allImeis[0] : undefined),
-      imeis: allImeis.length > 0 ? allImeis : undefined,
-      quantity,
-      returnDate: returnDate || Date.now(),
-      reason: reason || '',
-      notes: notes || '',
-      createdBy: req.user?._id
-    }]
-    const createdReturns = await CompanyReturn.create(returnData, { session })
-    const companyReturn = createdReturns[0]
-
+    // 5. Atomically Deduct Product Stock
     const updatedProduct = await Product.findOneAndUpdate(
-      { _id: productDoc._id, stock: { $gte: Math.abs(quantity) } },
-      { $inc: { stock: -Math.abs(quantity) } },
+      { _id: productDoc._id, stock: { $gte: quantity } },
+      { $inc: { stock: -quantity } },
       { session, new: true }
     )
     if (!updatedProduct) {
       await session.abortTransaction()
       session.endSession()
-      return res.status(422).json({ success: false, message: 'Insufficient stock to return', errors: {} })
+      return res.status(422).json({ success: false, message: `Insufficient stock to perform return (available: ${productDoc.stock}, requested: ${quantity})`, errors: {} })
     }
 
-    const returnAmount = (purchasePrice || productDoc.purchasePrice || 0) * quantity;
-    if (supplierDoc && returnAmount > 0) {
-      supplierDoc.totalAmount = Math.max(0, (supplierDoc.totalAmount || 0) - returnAmount);
-      
+    // Resolve authoritative purchase price from productDoc
+    const purchasePrice = Number(productDoc.purchasePrice || productDoc.costPrice || 0)
+    const returnAmount = purchasePrice * quantity
+
+    // 6. Update Supplier Balance
+    if (returnAmount > 0) {
+      supplierDoc.totalAmount = Math.max(0, (supplierDoc.totalAmount || 0) - returnAmount)
       if ((supplierDoc.pendingAmount || 0) >= returnAmount) {
-        supplierDoc.pendingAmount -= returnAmount;
+        supplierDoc.pendingAmount -= returnAmount
       } else {
-        const excess = returnAmount - (supplierDoc.pendingAmount || 0);
-        supplierDoc.pendingAmount = 0;
-        supplierDoc.paidAmount = Math.max(0, (supplierDoc.paidAmount || 0) - excess);
+        const excess = returnAmount - (supplierDoc.pendingAmount || 0)
+        supplierDoc.pendingAmount = 0
+        supplierDoc.paidAmount = Math.max(0, (supplierDoc.paidAmount || 0) - excess)
       }
-      
-      supplierDoc.pendingAmount = Math.max(0, supplierDoc.totalAmount - (supplierDoc.paidAmount || 0));
-      await supplierDoc.save({ session });
+      supplierDoc.pendingAmount = Math.max(0, supplierDoc.totalAmount - (supplierDoc.paidAmount || 0))
+      await supplierDoc.save({ session })
     }
 
-    // Create transaction
+    // 7. Create CompanyReturn record
+    const createdReturns = await CompanyReturn.create([{
+      supplier: supplierDoc._id,
+      supplierName: supplierDoc.name,
+      product: productDoc._id,
+      productName: productDoc.productName,
+      brand: productDoc.brand || '',
+      model: productDoc.model || '',
+      purchasePrice,
+      status: 'completed',
+      imei: allImeis.length > 0 ? allImeis[0] : undefined,
+      imeis: allImeis.length > 0 ? allImeis : undefined,
+      quantity,
+      returnDate: returnDate ? new Date(returnDate) : new Date(),
+      reason,
+      notes,
+      createdBy: req.user?._id
+    }], { session })
+    const companyReturn = createdReturns[0]
+
+    // 8. Create Financial Transaction Record
     await Transaction.create([{
       transactionType: 'return',
       referenceId: companyReturn._id,
       referenceNumber: companyReturn.returnId || companyReturn._id.toString(),
-      description: `Return to ${supplierDoc ? supplierDoc.name : supplierName} - ${productDoc.productName}`,
-      amount: (purchasePrice || productDoc.purchasePrice || 0) * quantity,
+      description: `Stock Return to ${supplierDoc.name} - ${productDoc.productName} (Qty: ${quantity})`,
+      amount: returnAmount,
       paymentMethod: 'cash',
-      relatedEntity: supplierDoc ? supplierDoc.name : supplierName,
+      relatedEntity: supplierDoc.name,
       transactionDate: new Date(returnDate || Date.now()),
       createdBy: req.user?._id,
     }], { session })
 
     await session.commitTransaction()
     session.endSession()
-    res.status(201).json({ success: true, message: 'Company return created successfully', data: companyReturn })
+    res.status(201).json({ success: true, message: 'Company return recorded successfully', data: companyReturn })
   } catch (error) {
     await session.abortTransaction()
     session.endSession()
-    res.status(500).json({ success: false, message: 'Failed to create return', errors: { error: error.message } })
+    console.error('[COMPANY_RETURN] Create Error:', error.message)
+    res.status(500).json({ success: false, message: error.message || 'Failed to create return', errors: { error: error.message } })
   }
 }
 
@@ -170,9 +230,9 @@ const deleteReturn = async (req, res) => {
         { session }
       )
       if (imeiResult.modifiedCount !== allImeis.length) {
-         await session.abortTransaction()
-         session.endSession()
-         return res.status(422).json({ success: false, message: 'Cannot delete return: Some items are no longer in returned state.', errors: {} })
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(422).json({ success: false, message: 'Cannot delete return: Some items are no longer in returned state.', errors: {} })
       }
     }
 
@@ -181,25 +241,21 @@ const deleteReturn = async (req, res) => {
     }
 
     if (companyReturn.supplier) {
-      const supplierDoc = await Supplier.findById(companyReturn.supplier).session(session);
+      const supplierDoc = await Supplier.findById(companyReturn.supplier).session(session)
       if (supplierDoc) {
-        const returnAmount = (companyReturn.purchasePrice || 0) * (companyReturn.quantity || 1);
+        const returnAmount = (companyReturn.purchasePrice || 0) * (companyReturn.quantity || 1)
         if (returnAmount > 0) {
-          supplierDoc.totalAmount = (supplierDoc.totalAmount || 0) + returnAmount;
-          // When we reverse the return, the supplier's total pending increases again.
-          // Because we don't know exactly if the original return deducted from pending or paid,
-          // we add it back to pending first (assuming no real money changed hands yet, just credit).
-          // If we want it perfectly symmetrical, we could just add it to pending.
-          supplierDoc.pendingAmount = (supplierDoc.pendingAmount || 0) + returnAmount;
-          supplierDoc.pendingAmount = Math.max(0, supplierDoc.totalAmount - (supplierDoc.paidAmount || 0));
-          await supplierDoc.save({ session });
+          supplierDoc.totalAmount = (supplierDoc.totalAmount || 0) + returnAmount
+          supplierDoc.pendingAmount = (supplierDoc.pendingAmount || 0) + returnAmount
+          supplierDoc.pendingAmount = Math.max(0, supplierDoc.totalAmount - (supplierDoc.paidAmount || 0))
+          await supplierDoc.save({ session })
         }
       }
     }
 
     await Transaction.findOneAndDelete({ referenceId: companyReturn._id, transactionType: 'return' }, { session })
-
     await CompanyReturn.findByIdAndDelete(req.params.id, { session })
+
     await session.commitTransaction()
     session.endSession()
     res.json({ success: true, message: 'Company return deleted successfully', data: {} })
@@ -261,4 +317,12 @@ const exportMobileReturns = async (req, res) => {
   }
 }
 
-module.exports = { getAllReturns, getReturnById, createReturn, deleteReturn, getReturnsBySupplier, exportReturns, exportMobileReturns }
+module.exports = {
+  getAllReturns,
+  getReturnById,
+  createReturn,
+  deleteReturn,
+  getReturnsBySupplier,
+  exportReturns,
+  exportMobileReturns
+}

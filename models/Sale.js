@@ -33,10 +33,11 @@ const saleSchema = new mongoose.Schema(
     
     // Retail specific
     partyGst: { type: String, default: '' },
+    gstPercent: { type: Number, default: 18 },
     warrantySaleAmount: { type: Number, default: 0 },
     delayPaymentExpected: { type: Boolean, default: false },
 
-    // For finance sales
+    // For finance sales & EMI Tracking
     financeDetails: {
       company: { type: String, default: '' },
       loanId: { type: String, default: '' }, // For Company Finance
@@ -45,8 +46,25 @@ const saleSchema = new mongoose.Schema(
       dpAmount: { type: Number, default: 0 },
       emiAmount: { type: Number, default: 0 },
       tenure: { type: String, default: '' },
+      emiPayDate: { type: Date, default: null },
       agentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
     },
+
+    // Installment Ledger for EMI tracking
+    installmentSchedule: [{
+      installmentNumber: { type: Number, required: true },
+      dueDate: { type: Date, required: true },
+      dueAmount: { type: Number, required: true },
+      paidAmount: { type: Number, default: 0 },
+      status: { type: String, enum: ['pending', 'due', 'paid', 'partial', 'overdue'], default: 'pending' },
+      actualPaymentDate: { type: Date, default: null },
+      paymentMethod: { type: String, default: '' },
+      reference: { type: String, default: '' },
+      notes: { type: String, default: '' }
+    }],
+
+    // Bill image snapshot reference
+    billImageUrl: { type: String, default: '' },
 
     // Bill payment tracking
     billStatus: { type: String, enum: ['draft', 'saved', 'paid', 'partially_paid', 'due', 'cancelled'], default: 'saved' },
@@ -61,3 +79,4 @@ const saleSchema = new mongoose.Schema(
 )
 
 module.exports = mongoose.model('Sale', saleSchema)
+

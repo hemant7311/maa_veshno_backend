@@ -35,7 +35,19 @@ app.use(cors({ origin: process.env.CLIENT_ORIGIN?.split(',') || true }))
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ limit: '50mb', extended: true }))
 
+const path = require('path')
+const fs = require('fs')
+const uploadsDir = path.join(__dirname, 'uploads')
+const slidersUploadDir = path.join(uploadsDir, 'sliders')
+const billsUploadDir = path.join(uploadsDir, 'bills')
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true })
+if (!fs.existsSync(slidersUploadDir)) fs.mkdirSync(slidersUploadDir, { recursive: true })
+if (!fs.existsSync(billsUploadDir)) fs.mkdirSync(billsUploadDir, { recursive: true })
+
+app.use('/uploads', express.static(uploadsDir))
+
 app.get('/api/health', (req, res) => {
+
   res.json({ message: 'Backend is connected', status: 'ok' })
 })
 

@@ -12,7 +12,9 @@ router.get('/:id', asyncHandler(controller.getOne))
 router.post('/', asyncHandler(controller.create)) // moved above requireAuth for testing
 router.use(requireAuth)
 router.put('/:id', asyncHandler(controller.update))
+router.post('/:id/bill-image', asyncHandler(controller.saveBillImage))
 router.patch('/:id/cancel', asyncHandler(controller.cancel))
 router.patch('/:id', asyncHandler(controller.receivePayment))
 
 module.exports = router
+

@@ -61,13 +61,16 @@ const CompanyReturnSchema = new mongoose.Schema({
   timestamps: true
 });
 
+const { getNextSequence } = require('../utils/counter');
+
 CompanyReturnSchema.pre('save', async function() {
   if (this.isNew && !this.returnId) {
-    const count = await this.constructor.countDocuments();
+    const seq = await getNextSequence('returnNumber');
     const prefix = 'RET';
     const year = new Date().getFullYear();
-    this.returnId = `${prefix}${year}${String(count + 1).padStart(5, '0')}`;
+    this.returnId = `${prefix}${year}${String(seq).padStart(5, '0')}`;
   }
 });
 
 module.exports = mongoose.model('CompanyReturn', CompanyReturnSchema);
+
