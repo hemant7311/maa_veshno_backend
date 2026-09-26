@@ -173,7 +173,7 @@ const create = async (req, res) => {
         address: req.body.address || '',
         gstNumber: req.body.partyGst || ''
       }]
-      const createdCustomers = await Customer.create(custData, { session })
+      const createdCustomers = await Customer.create(custData, { session, ordered: true })
       customer = createdCustomers[0]
     } else {
       customer.totalPurchases = (customer.totalPurchases || 0) + finalGrandTotal
@@ -283,7 +283,7 @@ const create = async (req, res) => {
       billStatus,
       promisedDate: promisedDate ? new Date(promisedDate) : undefined
     }]
-    const createdSales = await Sale.create(saleData, { session })
+    const createdSales = await Sale.create(saleData, { session, ordered: true })
     const sale = createdSales[0]
 
     // 6. Decrement Product Stock Atomically
@@ -329,7 +329,7 @@ const create = async (req, res) => {
         createdBy: req.user?._id,
       })
     }
-    await Transaction.create(txns, { session })
+    await Transaction.create(txns, { session, ordered: true })
 
     await session.commitTransaction()
     session.endSession()
@@ -618,7 +618,7 @@ const cancel = async (req, res) => {
       })
     }
     
-    await Transaction.create(cancelTxns, { session })
+    await Transaction.create(cancelTxns, { session, ordered: true })
 
     await session.commitTransaction()
     session.endSession()
@@ -999,7 +999,7 @@ const payInstallment = async (req, res) => {
       relatedEntity: sale.customerName,
       transactionDate: payDate,
       createdBy: req.user?._id,
-    }], { session })
+    }], { session, ordered: true })
 
     await session.commitTransaction()
     session.endSession()

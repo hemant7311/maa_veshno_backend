@@ -118,10 +118,10 @@ const create = async (req, res) => {
     if (initialImei) {
       pData.stock = 1
     }
-    const createdProducts = await Product.create([pData], { session })
+    const createdProducts = await Product.create([pData], { session, ordered: true })
     const product = createdProducts[0]
 
-    if (initialImei) await Imei.create([{ productId: product._id, imeiNumber: initialImei }], { session })
+    if (initialImei) await Imei.create([{ productId: product._id, imeiNumber: initialImei }], { session, ordered: true })
     
     // Adjust supplier ledger
     if (req.body.supplierId) {

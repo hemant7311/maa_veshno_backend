@@ -128,7 +128,7 @@ const createPurchase = async (req, res) => {
       notes: notes || '',
       createdBy: req.user?._id
     }]
-    const createdPurchases = await Purchase.create(purchaseData, { session })
+    const createdPurchases = await Purchase.create(purchaseData, { session, ordered: true })
     const purchase = createdPurchases[0]
 
     // Update stock and IMEIs

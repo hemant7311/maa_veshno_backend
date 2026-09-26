@@ -39,7 +39,7 @@ const createLoan = async (req, res) => {
       date: date || Date.now(),
       purpose: purpose || '', notes: notes || '', status: 'pending'
     }]
-    const createdLoans = await Loan.create(loanData, { session })
+    const createdLoans = await Loan.create(loanData, { session, ordered: true })
     const loan = createdLoans[0]
 
     // Create transaction record
@@ -162,7 +162,7 @@ const cancelLoan = async (req, res) => {
       });
     }
 
-    await Transaction.create(cancelTxns, { session })
+    await Transaction.create(cancelTxns, { session, ordered: true })
 
     await session.commitTransaction()
     session.endSession()
@@ -208,7 +208,7 @@ const addPayment = async (req, res) => {
       paymentMethod: normPaymentMethod,
       reference: reference || '', notes: notes || ''
     }]
-    const createdPayments = await LoanPayment.create(paymentData, { session })
+    const createdPayments = await LoanPayment.create(paymentData, { session, ordered: true })
     const payment = createdPayments[0]
 
     loan.paidAmount += amount

@@ -49,7 +49,7 @@ const createReceivable = async (req, res) => {
       customerDoc = await Customer.findOne({ phone: mobile }).session(session)
       if (!customerDoc) {
         const custData = [{ customerName, phone: mobile, customerType: 'retail' }]
-        const createdCusts = await Customer.create(custData, { session })
+        const createdCusts = await Customer.create(custData, { session, ordered: true })
         customerDoc = createdCusts[0]
       }
     }
@@ -60,7 +60,7 @@ const createReceivable = async (req, res) => {
       givenAmount, receivedAmount: 0,
       date: date || Date.now(), notes: notes || '', status: 'pending'
     }]
-    const createdRecs = await CustomerReceivable.create(recData, { session })
+    const createdRecs = await CustomerReceivable.create(recData, { session, ordered: true })
     const receivable = createdRecs[0]
 
     // Create transaction
@@ -241,7 +241,7 @@ const giveMoney = async (req, res) => {
       receivable: receivableId, type: 'give', amount, date: date || Date.now(),
       paymentMethod: normPaymentMethod, reference: reference || '', notes: notes || ''
     }]
-    const createdPayments = await CustomerReceivablePayment.create(paymentData, { session })
+    const createdPayments = await CustomerReceivablePayment.create(paymentData, { session, ordered: true })
     const payment = createdPayments[0]
 
     receivable.givenAmount += amount
@@ -304,7 +304,7 @@ const receiveMoney = async (req, res) => {
       receivable: receivableId, type: 'receive', amount, date: date || Date.now(),
       paymentMethod: normRecPaymentMethod, reference: reference || '', notes: notes || ''
     }]
-    const createdPayments = await CustomerReceivablePayment.create(paymentData, { session })
+    const createdPayments = await CustomerReceivablePayment.create(paymentData, { session, ordered: true })
     const payment = createdPayments[0]
 
     receivable.receivedAmount += amount
