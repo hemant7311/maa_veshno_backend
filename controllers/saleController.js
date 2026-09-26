@@ -835,4 +835,121 @@ const getBalanceSheet = async (req, res) => {
   }
 }
 
-module.exports = { getByInvoice, list, getOne, create, getPendingEmiNotifications, getBalanceSheet, update, cancel, receivePayment, saveBillImage }
+const payInstallment = async (req, res) => {
+  const session = await mongoose.startSession()
+  session.startTransaction()
+  try {
+    const saleId = req.params.id
+    const { installmentNumber, amount, paymentMethod: rawPaymentMethod, reference, notes, actualPaymentDate } = req.body
+
+    const sale = await Sale.findById(saleId).session(session)
+    if (!sale) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Sale not found', errors: {} })
+    }
+    if (sale.status === 'cancelled') {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(422).json({ success: false, message: 'Cannot pay installment for a cancelled sale', errors: {} })
+    }
+
+    const payAmount = Number(amount)
+    if (!payAmount || payAmount <= 0) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(422).json({ success: false, message: 'Payment amount must be greater than zero', errors: {} })
+    }
+
+    const paymentMethod = normalizePaymentMethod(rawPaymentMethod || 'cash')
+    const payDate = actualPaymentDate ? new Date(actualPaymentDate) : new Date()
+
+    let remainingToAllocate = payAmount
+    if (sale.installmentSchedule && sale.installmentSchedule.length > 0) {
+      if (installmentNumber !== undefined && installmentNumber !== null) {
+        const target = sale.installmentSchedule.find(inst => inst.installmentNumber === Number(installmentNumber))
+        if (target) {
+          const unpaid = target.dueAmount - (target.paidAmount || 0)
+          const allocation = Math.min(remainingToAllocate, Math.max(0, unpaid))
+          target.paidAmount = (target.paidAmount || 0) + allocation
+          target.actualPaymentDate = payDate
+          target.paymentMethod = paymentMethod
+          if (reference) target.reference = reference
+          if (notes) target.notes = notes
+
+          if (target.paidAmount >= target.dueAmount) {
+            target.status = 'paid'
+          } else if (target.paidAmount > 0) {
+            target.status = 'partial'
+          }
+          remainingToAllocate -= allocation
+        }
+      }
+
+      if (remainingToAllocate > 0) {
+        for (const inst of sale.installmentSchedule) {
+          if (remainingToAllocate <= 0) break
+          const unpaid = inst.dueAmount - (inst.paidAmount || 0)
+          if (unpaid > 0) {
+            const allocation = Math.min(remainingToAllocate, unpaid)
+            inst.paidAmount = (inst.paidAmount || 0) + allocation
+            inst.actualPaymentDate = payDate
+            inst.paymentMethod = paymentMethod
+            if (reference && !inst.reference) inst.reference = reference
+            if (notes && !inst.notes) inst.notes = notes
+
+            if (inst.paidAmount >= inst.dueAmount) {
+              inst.status = 'paid'
+            } else if (inst.paidAmount > 0) {
+              inst.status = 'partial'
+            }
+            remainingToAllocate -= allocation
+          }
+        }
+      }
+    }
+
+    sale.amountPaid = (sale.amountPaid || 0) + payAmount
+    sale.amountDue = Math.max(0, (sale.grandTotal || 0) - sale.amountPaid)
+    if (sale.amountDue <= 0) {
+      sale.billStatus = 'paid'
+      sale.amountDue = 0
+    } else if (sale.amountPaid > 0) {
+      sale.billStatus = 'partially_paid'
+    } else {
+      sale.billStatus = 'due'
+    }
+
+    await sale.save({ session })
+
+    if (sale.customerId) {
+      const customer = await Customer.findById(sale.customerId).session(session)
+      if (customer) {
+        customer.balance = Math.max(0, (customer.balance || 0) - payAmount)
+        await customer.save({ session })
+      }
+    }
+
+    await Transaction.create([{
+      transactionType: 'customer_payment',
+      referenceId: sale._id,
+      referenceNumber: sale.invoiceNumber,
+      description: `EMI Installment Payment for Invoice #${sale.invoiceNumber}`,
+      amount: payAmount,
+      paymentMethod,
+      relatedEntity: sale.customerName,
+      transactionDate: payDate,
+      createdBy: req.user?._id,
+    }], { session })
+
+    await session.commitTransaction()
+    session.endSession()
+    res.json({ success: true, message: 'Installment payment recorded successfully', data: sale })
+  } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
+    res.status(500).json({ success: false, message: error.message || 'Failed to pay installment', errors: { error: error.message } })
+  }
+}
+
+module.exports = { getByInvoice, list, getOne, create, getPendingEmiNotifications, getBalanceSheet, update, cancel, receivePayment, saveBillImage, payInstallment }

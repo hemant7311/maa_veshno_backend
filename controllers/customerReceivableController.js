@@ -3,6 +3,7 @@ const CustomerReceivablePayment = require('../models/CustomerReceivablePayment')
 const Customer = require('../models/Customer')
 const Transaction = require('../models/Transaction')
 const mongoose = require('mongoose')
+const { normalizePaymentMethod } = require('../utils/paymentMapper')
 
 const getAllReceivables = async (req, res) => {
   try {
@@ -235,9 +236,10 @@ const giveMoney = async (req, res) => {
       return res.status(422).json({ success: false, message: 'Cannot give money for a cancelled receivable', errors: {} })
     }
     
+    const normPaymentMethod = normalizePaymentMethod(paymentMethod || 'cash')
     const paymentData = [{
       receivable: receivableId, type: 'give', amount, date: date || Date.now(),
-      paymentMethod: paymentMethod || 'cash', reference: reference || '', notes: notes || ''
+      paymentMethod: normPaymentMethod, reference: reference || '', notes: notes || ''
     }]
     const createdPayments = await CustomerReceivablePayment.create(paymentData, { session })
     const payment = createdPayments[0]
@@ -249,7 +251,7 @@ const giveMoney = async (req, res) => {
       transactionType: 'customer_receivable_payment',
       referenceId: receivable._id, referenceNumber: payment._id.toString(),
       description: `Additional money given to ${receivable.customerName}`,
-      amount, paymentMethod: paymentMethod || 'cash',
+      amount, paymentMethod: normPaymentMethod,
       relatedEntity: receivable.customerName,
       transactionDate: new Date(date || Date.now()),
       createdBy: req.user?._id,
@@ -297,9 +299,10 @@ const receiveMoney = async (req, res) => {
       })
     }
     
+    const normRecPaymentMethod = normalizePaymentMethod(paymentMethod || 'cash')
     const paymentData = [{
       receivable: receivableId, type: 'receive', amount, date: date || Date.now(),
-      paymentMethod: paymentMethod || 'cash', reference: reference || '', notes: notes || ''
+      paymentMethod: normRecPaymentMethod, reference: reference || '', notes: notes || ''
     }]
     const createdPayments = await CustomerReceivablePayment.create(paymentData, { session })
     const payment = createdPayments[0]
@@ -311,7 +314,7 @@ const receiveMoney = async (req, res) => {
       transactionType: 'customer_receivable_payment',
       referenceId: receivable._id, referenceNumber: payment._id.toString(),
       description: `Money received from ${receivable.customerName}`,
-      amount, paymentMethod: paymentMethod || 'cash',
+      amount, paymentMethod: normRecPaymentMethod,
       relatedEntity: receivable.customerName,
       transactionDate: new Date(date || Date.now()),
       createdBy: req.user?._id,

@@ -2,6 +2,7 @@ const Loan = require('../models/Loan')
 const LoanPayment = require('../models/LoanPayment')
 const Transaction = require('../models/Transaction')
 const mongoose = require('mongoose')
+const { normalizePaymentMethod } = require('../utils/paymentMapper')
 
 const getAllLoans = async (req, res) => {
   try {
@@ -201,9 +202,10 @@ const addPayment = async (req, res) => {
       return res.status(422).json({ success: false, message: 'Payment amount cannot exceed remaining amount', errors: {} })
     }
     
+    const normPaymentMethod = normalizePaymentMethod(paymentMethod || 'cash')
     const paymentData = [{
       loan: loanId, amount, date: date || Date.now(),
-      paymentMethod: paymentMethod || 'cash',
+      paymentMethod: normPaymentMethod,
       reference: reference || '', notes: notes || ''
     }]
     const createdPayments = await LoanPayment.create(paymentData, { session })
@@ -219,7 +221,7 @@ const addPayment = async (req, res) => {
       referenceNumber: payment._id.toString(),
       description: `Loan repayment from ${loan.personName}`,
       amount,
-      paymentMethod: paymentMethod || 'cash',
+      paymentMethod: normPaymentMethod,
       relatedEntity: loan.personName,
       transactionDate: new Date(date || Date.now()),
       createdBy: req.user?._id,
