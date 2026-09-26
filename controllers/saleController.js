@@ -214,13 +214,38 @@ const create = async (req, res) => {
       }
     }
 
-    // 4. Generate Centralized Sequential Invoice Number using Financial Year
+    // 4. Generate Centralized Sequential Unique Invoice Number using Financial Year
     let inv = invoiceNumber
-    if (!inv || String(inv).includes('MVM-') || String(inv).includes('INV-') || String(inv).includes('Pending')) {
+    const isInvalidInv = !inv || String(inv).includes('MVM-') || String(inv).includes('INV-') || String(inv).includes('Pending') || String(inv).trim() === ''
+    
+    if (isInvalidInv) {
       const fy = getFinancialYear()
       const counterKey = saleType === 'wholesale' ? `wholesale_invoice:${fy}` : `invoiceNumber:${fy}`
-      const seq = await getNextSequence(counterKey, session)
-      inv = String(seq)
+      let isUnique = false
+      while (!isUnique) {
+        const seq = await getNextSequence(counterKey, session)
+        inv = String(seq)
+        const existingSale = await Sale.findOne({ invoiceNumber: inv }).session(session)
+        if (!existingSale) {
+          isUnique = true
+        }
+      }
+    } else {
+      // If a custom invoiceNumber was passed, verify it does not already exist
+      const existingSale = await Sale.findOne({ invoiceNumber: String(inv) }).session(session)
+      if (existingSale) {
+        const fy = getFinancialYear()
+        const counterKey = saleType === 'wholesale' ? `wholesale_invoice:${fy}` : `invoiceNumber:${fy}`
+        let isUnique = false
+        while (!isUnique) {
+          const seq = await getNextSequence(counterKey, session)
+          inv = String(seq)
+          const checkSale = await Sale.findOne({ invoiceNumber: inv }).session(session)
+          if (!checkSale) {
+            isUnique = true
+          }
+        }
+      }
     }
 
     // 5. Generate Installment Schedule if Finance Sale
