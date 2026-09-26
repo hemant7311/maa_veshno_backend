@@ -118,7 +118,7 @@ const create = async (req, res) => {
     let calcSubTotal = 0
     for (const item of items) {
       item.discount = Number(item.discount) || 0
-      item.qty = Number(item.qty) || 1
+      item.qty = Math.max(1, parseInt(item.qty, 10) || 1)
       item.price = Number(item.price) || 0
       const itemTotal = (item.price * item.qty) - item.discount
       item.total = itemTotal
@@ -192,6 +192,13 @@ const create = async (req, res) => {
 
     // 3. Validate and reserve IMEIs before sale
     const imeiList = items.map(item => item.imei).filter(Boolean)
+    const uniqueImeis = new Set(imeiList)
+    if (uniqueImeis.size !== imeiList.length) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(422).json({ success: false, message: 'Duplicate IMEI numbers in sale items list.', errors: {} })
+    }
+
     if (imeiList.length > 0) {
       const imeiResult = await Imei.updateMany(
         { imeiNumber: { $in: imeiList }, status: { $in: ['available', 'sellable'] } },
@@ -333,7 +340,7 @@ const update = async (req, res) => {
     let calcSubTotal = 0
     for (const item of items) {
       item.discount = Number(item.discount) || 0
-      item.qty = Number(item.qty) || 1
+      item.qty = Math.max(1, parseInt(item.qty, 10) || 1)
       item.price = Number(item.price) || 0
       const itemTotal = (item.price * item.qty) - item.discount
       item.total = itemTotal
@@ -357,7 +364,11 @@ const update = async (req, res) => {
 
     const finalGrandTotal = Math.round(calculatedGrandTotal * 100) / 100
     let additionalPayment = 0
-    if (amountPaid !== undefined) {
+    if (req.body.totalAmountPaid !== undefined) {
+      additionalPayment = Number(req.body.totalAmountPaid) - (oldSale.amountPaid || 0)
+    } else if (req.body.isTotalPaid && amountPaid !== undefined) {
+      additionalPayment = Number(amountPaid) - (oldSale.amountPaid || 0)
+    } else if (amountPaid !== undefined) {
       additionalPayment = Number(amountPaid)
     }
     
@@ -403,6 +414,13 @@ const update = async (req, res) => {
 
     // 2. Apply new IMEI and stock changes atomically
     const newImeiList = items.map(item => item.imei).filter(Boolean)
+    const uniqueNewImeis = new Set(newImeiList)
+    if (uniqueNewImeis.size !== newImeiList.length) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(422).json({ success: false, message: 'Duplicate IMEI numbers in updated sale items list.', errors: {} })
+    }
+
     if (newImeiList.length > 0) {
       const imeiResult = await Imei.updateMany(
         { imeiNumber: { $in: newImeiList }, status: { $in: ['available', 'sellable'] } },
