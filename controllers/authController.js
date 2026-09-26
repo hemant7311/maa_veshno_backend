@@ -16,7 +16,7 @@ const normalizeUsername = (value) => String(value || '').trim().toLowerCase()
 const validUsername = (value) => /^[a-z0-9][a-z0-9._-]{2,31}$/.test(value)
 
 const register = async (req, res) => {
-  const { name, username: usernameInput, password, role = 'finance_agent', permissions = [] } = req.body
+  const { name, username: usernameInput, password, role = 'staff', permissions = [] } = req.body
   const username = normalizeUsername(usernameInput)
 
   if (!name?.trim() || !validUsername(username) || typeof password !== 'string' || password.length < 6) {
@@ -26,7 +26,7 @@ const register = async (req, res) => {
       errors: {},
     })
   }
-  if (!['admin', 'finance_agent', 'wholesaler'].includes(role)) {
+  if (!['admin', 'staff', 'finance_agent', 'wholesaler'].includes(role)) {
     return res.status(422).json({ success: false, message: 'Invalid user role', errors: {} })
   }
   if (await User.exists({ username })) {
