@@ -25,6 +25,7 @@ const summary = async (req, res) => {
       todayExpenses,
       allExpenses,
       todayCompanyReturns,
+      allCompanyReturns,
       allProducts
     ] = await Promise.all([
       Product.countDocuments({ status: 'active' }).catch(() => 0),
@@ -37,8 +38,8 @@ const summary = async (req, res) => {
         { $match: { 'product.status': 'active' } },
         { $group: { _id: null, stock: { $sum: 1 }, purchaseValue: { $sum: '$product.purchasePrice' }, saleValue: { $sum: '$product.salePrice' } } },
       ]).catch(() => []),
-      Sale.find({ status: { $ne: 'cancelled' } }).lean().catch(() => []),
-      Sale.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: { $ne: 'cancelled' } }).lean().catch(() => []),
+      Sale.find({ status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean().catch(() => []),
+      Sale.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean().catch(() => []),
       Purchase.find({ status: 'completed' }).lean().catch(() => []),
       Purchase.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: 'completed' }).lean().catch(() => []),
       Expense.find({
@@ -46,10 +47,11 @@ const summary = async (req, res) => {
           { date: { $gte: dayStart, $lte: dayEnd } },
           { createdAt: { $gte: dayStart, $lte: dayEnd } }
         ]
-      }).lean().catch(() => []),
+      }).sort({ createdAt: -1 }).lean().catch(() => []),
       Expense.find().sort({ date: -1, createdAt: -1 }).lean().catch(() => []),
-      CompanyReturn.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: { $ne: 'cancelled' } }).lean().catch(() => []),
-      Product.find().select('_id productName purchasePrice costPrice').lean().catch(() => [])
+      CompanyReturn.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean().catch(() => []),
+      CompanyReturn.find({ status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean().catch(() => []),
+      Product.find().select('_id productName purchasePrice costPrice brand variant categoryName').lean().catch(() => [])
     ])
 
     const safeProducts = Array.isArray(allProducts) ? allProducts : []
@@ -116,14 +118,14 @@ const summary = async (req, res) => {
     // Process Overall All-Time Sales Accounting
     const safeAllExpenses = Array.isArray(allExpenses) ? allExpenses : []
     const overall = calculateSalesMetrics(allSales)
-    const totalExpenses = safeAllExpenses.reduce((sum, exp) => sum + (Number(exp?.amount) || 0), 0)
-    const netTotalProfit = overall.grossProfit - totalExpenses
+    const totalExpensesAmount = safeAllExpenses.reduce((sum, exp) => sum + (Number(exp?.amount) || 0), 0)
+    const netTotalProfit = overall.grossProfit - totalExpensesAmount
 
     // Process Today's Sales Accounting
     const safeTodayExpenses = Array.isArray(todayExpenses) ? todayExpenses : []
     const today = calculateSalesMetrics(todaySales)
-    const todayExpenseAmount = safeTodayExpenses.reduce((sum, exp) => sum + (Number(exp?.amount) || 0), 0)
-    const todayNetProfit = today.grossProfit - todayExpenseAmount
+    const todayExpensesAmount = safeTodayExpenses.reduce((sum, exp) => sum + (Number(exp?.amount) || 0), 0)
+    const todayNetProfit = today.grossProfit - todayExpensesAmount
 
     // Calculate Today's Stock In from purchases
     let todayStockIn = 0
@@ -140,7 +142,7 @@ const summary = async (req, res) => {
     const todayReturnsCount = safeTodayReturns.reduce((sum, cr) => sum + (Number(cr?.quantity) || 1), 0)
     const todayReturnsAmount = safeTodayReturns.reduce((sum, cr) => sum + ((Number(cr?.purchasePrice) || 0) * (Number(cr?.quantity) || 1)), 0)
 
-    const returnedProducts = safeTodayReturns.map(cr => ({
+    const mapReturn = (cr) => ({
       id: cr._id,
       name: cr.productName || cr.product?.productName || 'Returned Product',
       brand: cr.brand || '—',
@@ -148,18 +150,26 @@ const summary = async (req, res) => {
       imei: cr.imeiNumber || (Array.isArray(cr.imeiNumbers) ? cr.imeiNumbers.join(', ') : '') || '—',
       price: Number(cr.purchasePrice) || 0,
       date: cr.returnDate ? new Date(cr.returnDate).toISOString().split('T')[0] : (cr.createdAt ? new Date(cr.createdAt).toISOString().split('T')[0] : dateStr)
-    }))
+    })
 
-    const safeAllSales = Array.isArray(allSales) ? allSales : []
-    const recentSales = safeAllSales.slice(0, 15).map(sale => ({
+    const mapSale = (sale) => ({
       id: sale.invoiceNumber || sale._id,
       customer: sale.customerName || 'Retail Customer',
       phone: sale.phone || '—',
       date: sale.createdAt ? new Date(sale.createdAt).toISOString() : new Date().toISOString(),
       amount: Number(sale.grandTotal) || 0,
-      mode: sale.paymentMode || 'cash',
+      mode: (sale.paymentMode || 'cash').toUpperCase(),
       products: Array.isArray(sale.items) ? sale.items.map(i => i.productName).join(', ') : ''
-    }))
+    })
+
+    const mapExpense = (exp) => ({
+      id: exp._id,
+      category: exp.category || 'Expense',
+      description: exp.description || '—',
+      amount: Number(exp.amount) || 0,
+      date: exp.date ? new Date(exp.date).toISOString().split('T')[0] : (exp.createdAt ? new Date(exp.createdAt).toISOString().split('T')[0] : dateStr),
+      time: exp.createdAt ? new Date(exp.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+    })
 
     const safeStockByProduct = Array.isArray(stockByProduct) ? stockByProduct : []
     const stockMap = new Map(safeStockByProduct.map((item) => [String(item._id), Number(item.stock) || 0]))
@@ -171,6 +181,10 @@ const summary = async (req, res) => {
       .slice(0, 10)
 
     const invSummaryObj = Array.isArray(inventorySummary) && inventorySummary.length > 0 ? inventorySummary[0] : {}
+
+    const safeTodaySales = Array.isArray(todaySales) ? todaySales : []
+    const safeAllSalesList = Array.isArray(allSales) ? allSales : []
+    const safeAllCompanyReturns = Array.isArray(allCompanyReturns) ? allCompanyReturns : []
 
     res.json({
       success: true,
@@ -185,50 +199,60 @@ const summary = async (req, res) => {
         potentialProfit: (Number(invSummaryObj?.saleValue) || 0) - (Number(invSummaryObj?.purchaseValue) || 0),
         lowStock,
         
-        // Authoritative Accounting Fields
+        // Authoritative Accounting Fields (Total Net Profit)
         totalSales: Math.round(overall.revenue),
         totalCost: Math.round(overall.cost),
         totalGrossProfit: Math.round(overall.grossProfit),
-        totalExpenses: Math.round(totalExpenses),
+        totalExpenses: Math.round(totalExpensesAmount),
         totalNetProfit: Math.round(netTotalProfit),
         
-        // TOTAL PROFIT CARD = TOTAL GROSS PROFIT
-        totalProfit: Math.round(overall.grossProfit),
+        // TOTAL PROFIT CARD = AUTHORITATIVE TOTAL NET PROFIT (BUG A RESOLVED)
+        totalProfit: Math.round(netTotalProfit),
 
-        // Gross Profit by Payment Mode (All-Time)
+        // Gross Profit / Breakdown by Payment Mode
+        totalCashProfit: Math.round(overall.grossCashProfit),
+        totalUpiProfit: Math.round(overall.grossUpiProfit + overall.grossCardProfit + overall.grossFinanceProfit),
         grossCashProfit: Math.round(overall.grossCashProfit),
         grossUpiProfit: Math.round(overall.grossUpiProfit),
         grossCardProfit: Math.round(overall.grossCardProfit),
         grossFinanceProfit: Math.round(overall.grossFinanceProfit),
-        totalCashProfit: Math.round(overall.grossCashProfit),
-        totalUpiProfit: Math.round(overall.grossUpiProfit + overall.grossCardProfit + overall.grossFinanceProfit),
 
-        // Today Accounting Fields
+        // Today Accounting Fields (Today Net Profit)
         todayTotalSales: Math.round(today.revenue),
         todayTotalCost: Math.round(today.cost),
         todayGrossProfit: Math.round(today.grossProfit),
-        todayExpense: Math.round(todayExpenseAmount),
-        todayExpenses: Math.round(todayExpenseAmount),
+        todayExpense: Math.round(todayExpensesAmount),
+        todayExpensesAmount: Math.round(todayExpensesAmount),
         todayNetProfit: Math.round(todayNetProfit),
         
-        // TODAY'S PROFIT CARD = TODAY GROSS PROFIT
-        todayProfit: Math.round(today.grossProfit),
+        // TODAY'S PROFIT CARD = AUTHORITATIVE TODAY NET PROFIT (BUG B RESOLVED)
+        todayProfit: Math.round(todayNetProfit),
 
-        // Gross Profit by Payment Mode (Today)
+        todayCashProfit: Math.round(today.grossCashProfit),
+        todayUpiProfit: Math.round(today.grossUpiProfit + today.grossCardProfit + today.grossFinanceProfit),
         todayGrossCashProfit: Math.round(today.grossCashProfit),
         todayGrossUpiProfit: Math.round(today.grossUpiProfit),
         todayGrossCardProfit: Math.round(today.grossCardProfit),
         todayGrossFinanceProfit: Math.round(today.grossFinanceProfit),
-        todayCashProfit: Math.round(today.grossCashProfit),
-        todayUpiProfit: Math.round(today.grossUpiProfit + today.grossCardProfit + today.grossFinanceProfit),
 
+        // Today Stock In & Returns
         todayStockIn,
         todayReturnsCount,
         todayReturnsAmount,
-        returnedProducts,
-        recentSales,
-        soldProducts: recentSales,
-        recentExpenses: safeAllExpenses.slice(0, 20)
+
+        // Mapped Arrays for UI Tables
+        todaySoldProducts: safeTodaySales.map(mapSale),
+        soldProducts: safeTodaySales.map(mapSale), // Selected date sales for UI table
+        allSales: safeAllSalesList.map(mapSale),
+        recentSales: safeAllSalesList.slice(0, 15).map(mapSale),
+        
+        returnedProducts: safeTodayReturns.map(mapReturn),
+        allReturnedProducts: safeAllCompanyReturns.map(mapReturn),
+
+        todayExpenses: safeTodayExpenses.map(mapExpense),
+        shopExpenses: safeTodayExpenses.map(mapExpense),
+        allExpenses: safeAllExpenses.map(mapExpense),
+        recentExpenses: safeAllExpenses.slice(0, 20).map(mapExpense)
       },
     })
   } catch (error) {
