@@ -1035,53 +1035,119 @@ const getPendingEmiNotifications = async (req, res) => {
 const getBalanceSheet = async (req, res) => {
   try {
     const { startDate, endDate } = req.query
-    const matchObj = { status: { $ne: 'cancelled' } }
+    const matchObj = {
+      status: { $ne: 'cancelled' },
+      billStatus: { $nin: ['cancelled', 'draft'] }
+    }
+
     if (startDate || endDate) {
       matchObj.createdAt = {}
       if (startDate) matchObj.createdAt.$gte = new Date(startDate)
-      if (endDate) { const e = new Date(endDate); e.setHours(23,59,59,999); matchObj.createdAt.$lte = e }
+      if (endDate) {
+        const end = new Date(endDate)
+        end.setHours(23, 59, 59, 999)
+        matchObj.createdAt.$lte = end
+      }
     }
 
     const allSales = await Sale.find(matchObj).sort({ createdAt: -1 })
 
-    const gstSales = allSales.filter(s => s.partyGst && s.partyGst.length > 0)
-    let totalGstSales = 0, totalGstTaxCollected = 0
+    // 1. GST Ledger Filter: TotalTax > 0 OR gstPercent > 0
+    const gstSales = allSales.filter(s =>
+      (s.totalTax !== undefined && Number(s.totalTax) > 0) ||
+      (s.gstPercent !== undefined && Number(s.gstPercent) > 0)
+    )
+
+    let totalGstSales = 0
+    let totalGstTaxCollected = 0
     const gstLedger = gstSales.map(s => {
-      totalGstSales += s.grandTotal || 0
-      totalGstTaxCollected += s.totalTax || 0
+      const grandTotal = Number(s.grandTotal) || 0
+      const totalTax = Number(s.totalTax) || 0
+      const subTotal = Number(s.subTotal) || 0
+      const totalDiscount = Number(s.totalDiscount) || 0
+      const taxableValue = Math.max(0, subTotal - totalDiscount)
+
+      totalGstSales += grandTotal
+      totalGstTaxCollected += totalTax
+
       return {
-        date: s.createdAt, invoiceNumber: s.invoiceNumber, customerName: s.customerName,
-        partyGst: s.partyGst, taxableValue: (s.subTotal || 0) - (s.totalDiscount || 0),
-        taxAmount: s.totalTax, totalAmount: s.grandTotal
+        _id: s._id,
+        date: s.createdAt,
+        invoiceNumber: s.invoiceNumber || '—',
+        customerName: s.customerName || 'Customer',
+        partyGst: s.partyGst && String(s.partyGst).trim() !== '' ? s.partyGst : 'N/A',
+        gstRate: s.gstPercent !== undefined ? Number(s.gstPercent) : 18,
+        taxableValue,
+        taxAmount: totalTax,
+        totalAmount: grandTotal
       }
     })
 
-    const stockLedger = allSales.map(s => ({
-      date: s.createdAt, type: 'Sale',
-      invoiceNumber: s.invoiceNumber,
-      items: s.items.map(i => `${i.productName} (x${i.qty})`).join(', '),
-      amount: s.grandTotal
-    }))
+    // 2. Stock Ledger: Valid non-draft non-cancelled sales
+    const stockSales = allSales.filter(s => s.billStatus !== 'draft' && s.status !== 'cancelled' && s.billStatus !== 'cancelled')
+    let totalStockSold = 0
+    const stockLedger = stockSales.map(s => {
+      const gTotal = Number(s.grandTotal) || 0
+      totalStockSold += gTotal
+      const itemsSummary = (s.items || []).map(i => {
+        const qty = i.qty || 1
+        const imeiStr = i.imei && i.imei !== 'N/A' && i.imei !== '—' ? ` [${i.imei}]` : ''
+        return `${i.productName || 'Product'} (x${qty})${imeiStr}`
+      }).join(', ')
 
-    const financeSales = allSales.filter(s => s.paymentMode === 'finance')
-    const financeLedger = financeSales.map(s => ({
-      date: s.createdAt, invoiceNumber: s.invoiceNumber, customerName: s.customerName,
-      company: s.financeDetails?.company || 'Unknown',
-      financeType: s.financeDetails?.company ? 'Company' : 'Private',
-      loanId: s.financeDetails?.loanId || s.financeDetails?.fileNo || '-',
-      amount: s.grandTotal, emiAmount: s.financeDetails?.emiAmount || 0, tenure: s.financeDetails?.tenure || '0'
-    }))
+      return {
+        _id: s._id,
+        date: s.createdAt,
+        type: s.saleType === 'wholesale' ? 'Wholesale Sale' : 'Retail Sale',
+        invoiceNumber: s.invoiceNumber || '—',
+        items: itemsSummary,
+        amount: gTotal
+      }
+    })
+
+    // 3. Finance Ledger: Valid non-draft non-cancelled sales with paymentMode === 'finance' or financeDetails
+    const financeSales = allSales.filter(s =>
+      (s.paymentMode === 'finance' || !!(s.financeDetails && (s.financeDetails.company || s.financeDetails.emiAmount))) &&
+      s.billStatus !== 'draft' && s.status !== 'cancelled' && s.billStatus !== 'cancelled'
+    )
+    let totalFinancedAmountSum = 0
+    const financeLedger = financeSales.map(s => {
+      const gTotal = Number(s.grandTotal) || 0
+      const dpAmt = Number(s.financeDetails?.dpAmount) || 0
+      const finAmt = Math.max(0, gTotal - dpAmt)
+      totalFinancedAmountSum += finAmt
+
+      const company = s.financeDetails?.company || 'Company Finance'
+      const isPrivate = String(company).toLowerCase().includes('private') || String(company).toLowerCase().includes('smarthub')
+
+      return {
+        _id: s._id,
+        date: s.createdAt,
+        invoiceNumber: s.invoiceNumber || '—',
+        customerName: s.customerName || 'Customer',
+        company,
+        financeType: isPrivate ? 'Private' : 'Company',
+        loanId: s.financeDetails?.loanId || s.financeDetails?.fileNo || '-',
+        downPayment: dpAmt,
+        financedAmount: finAmt,
+        grandTotal: gTotal,
+        emiAmount: Number(s.financeDetails?.emiAmount) || 0,
+        tenure: s.financeDetails?.tenure ? `${s.financeDetails.tenure} Months` : '-',
+        firstEmiDate: s.financeDetails?.firstEmiDate || s.financeDetails?.emiPayDate || null
+      }
+    })
 
     res.json({
       success: true,
       data: {
         gst: { ledger: gstLedger, totalSales: totalGstSales, totalTax: totalGstTaxCollected },
-        stock: { ledger: stockLedger, totalSold: allSales.reduce((a, s) => a + (s.grandTotal || 0), 0) },
-        finance: { ledger: financeLedger, totalAmount: financeSales.reduce((a, s) => a + (s.grandTotal || 0), 0) }
+        stock: { ledger: stockLedger, totalSold: totalStockSold },
+        finance: { ledger: financeLedger, totalAmount: totalFinancedAmountSum }
       }
     })
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Failed to get balance sheet', errors: { error: error.message } })
+    console.error('[BALANCE SHEET] Error:', error)
+    res.status(500).json({ success: false, message: 'Failed to get balance sheet data', errors: { error: error.message } })
   }
 }
 
