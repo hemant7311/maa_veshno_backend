@@ -99,23 +99,13 @@ const summary = async (req, res) => {
           const qty = Number(item.qty) || 1
           const itemNetSelling = item.total !== undefined ? Number(item.total) : (((Number(item.price) || 0) * qty) - (Number(item.discount) || 0))
           
-          let unitCost = (item.purchasePrice !== undefined && Number(item.purchasePrice) > 0) ? Number(item.purchasePrice) : 0
-          if (!unitCost && item.productId) {
-            unitCost = productCostMap.get(String(item.productId)) || 0
-          }
-          if (!unitCost && item.productName) {
-            unitCost = productNameCostMap.get(String(item.productName).toLowerCase().trim()) || 0
-          }
-
-          const unitSelling = qty > 0 ? (itemNetSelling / qty) : itemNetSelling
-          if (unitSelling > 0 && unitCost > unitSelling * 2.5) {
-            if (unitCost === 100000 && (unitSelling >= 10000 && unitSelling <= 15000)) {
-              unitCost = 10000
-            } else if (unitCost / 10 > 0 && (unitCost / 10) <= unitSelling) {
-              unitCost = Math.round(unitCost / 10)
-            } else {
-              unitCost = Math.min(unitCost, unitSelling)
-            }
+          let unitCost = 0
+          if (item.purchasePrice !== undefined && item.purchasePrice !== null && !isNaN(Number(item.purchasePrice))) {
+            unitCost = Number(item.purchasePrice)
+          } else if (item.productId && productCostMap.has(String(item.productId))) {
+            unitCost = productCostMap.get(String(item.productId))
+          } else if (item.productName && productNameCostMap.has(String(item.productName).toLowerCase().trim())) {
+            unitCost = productNameCostMap.get(String(item.productName).toLowerCase().trim())
           }
 
           const lineCost = unitCost * qty
