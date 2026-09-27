@@ -159,7 +159,8 @@ const migrateDatabase = async () => {
 connectDatabase()
   .then(() => {
     console.log('✅ MongoDB connected')
-    // migrateDatabase().catch((error) => console.warn('Database migration skipped:', error.message))
+    const { migrateLegacyFinanceRecords } = require('./utils/financeSync')
+    migrateLegacyFinanceRecords().catch(err => console.warn('Legacy finance migration warning:', err.message))
   })
   .catch((error) => {
     console.warn('⚠️  MongoDB not connected:', error.message)

@@ -39,6 +39,7 @@ const saleSchema = new mongoose.Schema(
 
     // For finance sales & EMI Tracking
     financeDetails: {
+      financeType: { type: String, enum: ['company', 'private'], default: 'company' },
       company: { type: String, default: '' },
       loanId: { type: String, default: '' }, // For Company Finance
       fileNo: { type: String, default: '' }, // For Private Finance
