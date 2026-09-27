@@ -199,6 +199,14 @@ const create = async (req, res) => {
         } else {
           item.purchasePrice = Number(item.purchasePrice || 0)
         }
+      } else if (item.productName) {
+        const p = await Product.findOne({ productName: new RegExp('^' + String(item.productName).trim() + '$', 'i') }).session(session)
+        if (p) {
+          item.purchasePrice = Number(p.purchasePrice ?? p.costPrice ?? 0)
+          item.productId = p._id
+        } else {
+          item.purchasePrice = Number(item.purchasePrice || 0)
+        }
       } else {
         item.purchasePrice = Number(item.purchasePrice || 0)
       }
@@ -494,15 +502,61 @@ const update = async (req, res) => {
       }
     }
 
+    // Authoritative Historical Purchase Price Resolution on Update
+    const oldItemsMapByProdId = new Map()
+    const oldItemsMapByName = new Map()
+    const oldItemsMapByImei = new Map()
+    if (Array.isArray(oldSale.items)) {
+      oldSale.items.forEach(oldItem => {
+        const costVal = Number(oldItem.purchasePrice) || 0
+        if (oldItem.productId && costVal > 0) oldItemsMapByProdId.set(String(oldItem.productId), costVal)
+        if (oldItem.productName && costVal > 0) oldItemsMapByName.set(String(oldItem.productName).toLowerCase().trim(), costVal)
+        if (oldItem.imei && costVal > 0) oldItemsMapByImei.set(String(oldItem.imei).toLowerCase().trim(), costVal)
+      })
+    }
+
+    for (const item of items) {
+      let preservedCost = 0
+      if (item.imei && oldItemsMapByImei.has(String(item.imei).toLowerCase().trim())) {
+        preservedCost = oldItemsMapByImei.get(String(item.imei).toLowerCase().trim())
+      } else if (item.productId && oldItemsMapByProdId.has(String(item.productId))) {
+        preservedCost = oldItemsMapByProdId.get(String(item.productId))
+      } else if (item.productName && oldItemsMapByName.has(String(item.productName).toLowerCase().trim())) {
+        preservedCost = oldItemsMapByName.get(String(item.productName).toLowerCase().trim())
+      }
+
+      if (preservedCost > 0) {
+        item.purchasePrice = preservedCost
+      } else {
+        if (item.productId) {
+          const p = await Product.findById(item.productId).session(session)
+          if (p) item.purchasePrice = Number(p.purchasePrice ?? p.costPrice ?? 0)
+          else item.purchasePrice = Number(item.purchasePrice || 0)
+        } else if (item.productName) {
+          const p = await Product.findOne({ productName: new RegExp('^' + String(item.productName).trim() + '$', 'i') }).session(session)
+          if (p) {
+            item.purchasePrice = Number(p.purchasePrice ?? p.costPrice ?? 0)
+            item.productId = p._id
+          } else {
+            item.purchasePrice = Number(item.purchasePrice || 0)
+          }
+        } else {
+          item.purchasePrice = Number(item.purchasePrice || 0)
+        }
+      }
+    }
+
     // 3. Update customer balance difference
     const diff = finalGrandTotal - oldSale.grandTotal
     if (diff !== 0 || additionalPayment !== 0) {
       const balanceChange = diff - additionalPayment
-      await Customer.findByIdAndUpdate(oldSale.customerId, { 
-        $inc: { totalPurchases: diff, balance: balanceChange } 
-      }, { session })
+      if (oldSale.customerId) {
+        await Customer.findByIdAndUpdate(oldSale.customerId, { 
+          $inc: { totalPurchases: diff, balance: balanceChange } 
+        }, { session })
+      }
       if (diff !== 0) {
-        await Transaction.findOneAndUpdate({ referenceId: saleId, transactionType: 'sale' }, { amount: finalGrandTotal }, { session })
+        await Transaction.findOneAndUpdate({ referenceId: oldSale._id, transactionType: 'sale' }, { amount: finalGrandTotal }, { session })
       }
       if (additionalPayment > 0) {
         await Transaction.create([{
@@ -631,7 +685,7 @@ const cancel = async (req, res) => {
     if (sale.amountPaid > 0) {
       cancelTxns.push({
         transactionType: 'refund',
-        referenceId: saleId,
+        referenceId: sale._id,
         referenceNumber: sale.invoiceNumber,
         description: `Customer payment refund due to cancellation - Invoice #${sale.invoiceNumber}`,
         amount: sale.amountPaid,
@@ -642,7 +696,9 @@ const cancel = async (req, res) => {
       })
     }
     
-    await Transaction.create(cancelTxns, { session, ordered: true })
+    if (cancelTxns.length > 0) {
+      await Transaction.create(cancelTxns, { session, ordered: true })
+    }
 
     await session.commitTransaction()
     session.endSession()

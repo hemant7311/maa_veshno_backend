@@ -106,12 +106,14 @@ const summary = async (req, res) => {
           const itemNetSelling = item.total !== undefined ? Number(item.total) : (((Number(item.price) || 0) * qty) - (Number(item.discount) || 0))
           
           let unitCost = 0
-          if (item.purchasePrice !== undefined && item.purchasePrice !== null && !isNaN(Number(item.purchasePrice))) {
+          if (item.purchasePrice !== undefined && item.purchasePrice !== null && !isNaN(Number(item.purchasePrice)) && Number(item.purchasePrice) > 0) {
             unitCost = Number(item.purchasePrice)
-          } else if (item.productId && productCostMap.has(String(item.productId))) {
+          } else if (item.productId && productCostMap.has(String(item.productId)) && productCostMap.get(String(item.productId)) > 0) {
             unitCost = productCostMap.get(String(item.productId))
           } else if (item.productName && productNameCostMap.has(String(item.productName).toLowerCase().trim())) {
             unitCost = productNameCostMap.get(String(item.productName).toLowerCase().trim())
+          } else if (item.purchasePrice !== undefined && item.purchasePrice !== null && !isNaN(Number(item.purchasePrice))) {
+            unitCost = Number(item.purchasePrice)
           }
 
           const lineCost = unitCost * qty
@@ -265,7 +267,7 @@ const summary = async (req, res) => {
         todayGrossFinanceProfit: Math.round(today.grossFinanceProfit),
 
         // Today Stock In & Returns
-        todayStockIn: currentTotalStock,
+        todayStockIn: todayStockIn,
         todayReturnsCount,
         todayReturnsAmount,
 
