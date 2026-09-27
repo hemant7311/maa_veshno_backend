@@ -103,15 +103,24 @@ const getOne = async (req, res) => {
 const mongoose = require('mongoose')
 const Supplier = require('../models/Supplier')
 
+const { isValidIMEI } = require('../utils/imeiValidator')
+
 const create = async (req, res) => {
   const session = await mongoose.startSession()
   session.startTransaction()
   try {
     const initialImei = String(req.body.imeiNumber || '').trim()
-    if (initialImei && await Imei.exists({ imeiNumber: initialImei })) {
-      await session.abortTransaction()
-      session.endSession()
-      return res.status(409).json({ success: false, message: 'This IMEI number already exists', errors: { imeiNumber: 'Duplicate IMEI number' } })
+    if (initialImei && initialImei !== 'N/A') {
+      if (!isValidIMEI(initialImei)) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(400).json({ success: false, message: 'IMEI must be exactly 15 digits.', errors: { imeiNumber: 'IMEI must be exactly 15 digits.' } })
+      }
+      if (await Imei.exists({ imeiNumber: initialImei })) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(409).json({ success: false, message: 'This IMEI number already exists', errors: { imeiNumber: 'Duplicate IMEI number' } })
+      }
     }
     
     const pData = productData(req.body)

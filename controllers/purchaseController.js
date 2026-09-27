@@ -93,7 +93,25 @@ const createPurchase = async (req, res) => {
       })
     }
 
+const { isValidIMEI } = require('../utils/imeiValidator')
+const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidator')
+
+    if (supplierMobile) {
+      const normMob = normalizeMobile(supplierMobile)
+      if (!isValidIndianMobile(normMob)) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(400).json({ success: false, message: 'Mobile number must be exactly 10 digits.', errors: {} })
+      }
+    }
+
     if (allRequestImeis.length > 0) {
+      const invalidImei = allRequestImeis.find(im => !isValidIMEI(im))
+      if (invalidImei) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(400).json({ success: false, message: 'IMEI must be exactly 15 digits.', errors: {} })
+      }
       if (new Set(allRequestImeis).size !== allRequestImeis.length) {
         await session.abortTransaction()
         session.endSession()

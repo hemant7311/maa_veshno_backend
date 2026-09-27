@@ -3,7 +3,13 @@ const mongoose = require('mongoose')
 const customerSchema = new mongoose.Schema(
   {
     customerName: { type: String, required: true, trim: true },
-    phone: { type: String, required: true, trim: true, unique: true },
+    phone: { 
+      type: String, 
+      required: true, 
+      trim: true, 
+      unique: true,
+      match: [/^[6-9]\d{9}$/, 'Mobile number must be exactly 10 digits']
+    },
     email: { type: String, trim: true, lowercase: true, default: '' },
     address: { type: String, trim: true, default: '' },
     gstNumber: { type: String, trim: true, default: '' },

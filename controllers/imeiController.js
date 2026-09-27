@@ -1,6 +1,8 @@
 const Imei = require('../models/Imei')
 const Product = require('../models/Product')
 
+const { isValidIMEI } = require('../utils/imeiValidator')
+
 const normalizeImeiNumbers = (numbers) => [...new Set((Array.isArray(numbers) ? numbers : [numbers])
   .map((number) => String(number || '').trim())
   .filter(Boolean))]
@@ -23,6 +25,12 @@ const create = async (req, res) => {
   const numbers = normalizeImeiNumbers(imeiNumbers || imeiNumber)
   if (!productId) return res.status(422).json({ success: false, message: 'Product is required', errors: { productId: 'Product is required' } })
   if (!numbers.length) return res.status(422).json({ success: false, message: 'At least one IMEI number is required', errors: { imeiNumbers: 'At least one IMEI number is required' } })
+  
+  const invalidImei = numbers.find(num => !isValidIMEI(num))
+  if (invalidImei) {
+    return res.status(400).json({ success: false, message: 'IMEI must be exactly 15 digits.', errors: { imeiNumbers: 'IMEI must be exactly 15 digits.' } })
+  }
+
   if (numbers.length !== (Array.isArray(imeiNumbers) ? imeiNumbers.filter((number) => String(number || '').trim()).length : 1)) {
     return res.status(422).json({ success: false, message: 'Duplicate IMEI numbers were entered', errors: { imeiNumbers: 'Duplicate IMEI numbers are not allowed' } })
   }

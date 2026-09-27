@@ -108,18 +108,38 @@ const create = async (req, res) => {
   session.startTransaction()
 
   try {
+const { isValidIMEI } = require('../utils/imeiValidator')
+const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidator')
+
     const { 
-      invoiceNumber, customerName, phone, saleType = 'retail', paymentMode: rawPaymentMode, 
+      invoiceNumber, customerName, phone: rawPhone, saleType = 'retail', paymentMode: rawPaymentMode, 
       items, subTotal, totalDiscount, totalTax, gstPercent: inputGstPercent, grandTotal, financeDetails,
       pickedBy, partyGst, warrantySaleAmount, delayPaymentExpected, amountPaid, promisedDate
     } = req.body
 
+    const phone = normalizeMobile(rawPhone)
     const paymentMode = normalizePaymentMethod(rawPaymentMode || (financeDetails ? 'finance' : 'cash'))
 
     if (!customerName || !phone || !items || !items.length) {
       await session.abortTransaction()
       session.endSession()
       return res.status(422).json({ success: false, message: 'Missing required sale details (customer name, phone, items)', errors: {} })
+    }
+
+    if (!isValidIndianMobile(phone)) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(400).json({ success: false, message: 'Mobile number must be exactly 10 digits.', errors: { phone: 'Mobile number must be exactly 10 digits.' } })
+    }
+
+    for (const item of items) {
+      if (item.imei && item.imei !== 'N/A' && item.imei.trim() !== '') {
+        if (!isValidIMEI(item.imei.trim())) {
+          await session.abortTransaction()
+          session.endSession()
+          return res.status(400).json({ success: false, message: 'IMEI must be exactly 15 digits.', errors: { imei: 'IMEI must be exactly 15 digits.' } })
+        }
+      }
     }
 
     // Recalculate totals authoritatively

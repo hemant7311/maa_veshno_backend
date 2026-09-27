@@ -48,8 +48,19 @@ const createReturn = async (req, res) => {
     if (req.body.imei && !allImeis.includes(req.body.imei)) {
       allImeis.unshift(req.body.imei)
     }
+const { isValidIMEI } = require('../utils/imeiValidator')
+
     // Clean and deduplicate IMEI strings
     allImeis = [...new Set(allImeis.map(i => String(i || '').trim()).filter(Boolean))]
+
+    if (allImeis.length > 0) {
+      const invalidIm = allImeis.find(im => !isValidIMEI(im))
+      if (invalidIm) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(400).json({ success: false, message: 'IMEI must be exactly 15 digits.', errors: {} })
+      }
+    }
 
     // 1. Basic Field Validations
     if (!supplierId) {

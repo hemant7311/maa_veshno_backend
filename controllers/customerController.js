@@ -1,4 +1,5 @@
 const Customer = require('../models/Customer')
+const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidator')
 
 const list = async (req, res) => {
   const customers = await Customer.find().sort({ createdAt: -1 })
@@ -12,13 +13,24 @@ const getOne = async (req, res) => {
 }
 
 const create = async (req, res) => {
-  const { customerName, phone } = req.body
+  const { customerName, phone: rawPhone } = req.body
+  const phone = normalizeMobile(rawPhone)
   if (!customerName || !phone) return res.status(422).json({ success: false, message: 'Customer name and phone are required', errors: {} })
-  const customer = await Customer.create(req.body)
+  if (!isValidIndianMobile(phone)) {
+    return res.status(400).json({ success: false, message: 'Mobile number must be exactly 10 digits.', errors: { phone: 'Mobile number must be exactly 10 digits.' } })
+  }
+  const customer = await Customer.create({ ...req.body, phone })
   res.status(201).json({ success: true, message: 'Customer created', data: customer })
 }
 
 const update = async (req, res) => {
+  if (req.body.phone !== undefined) {
+    const phone = normalizeMobile(req.body.phone)
+    if (!isValidIndianMobile(phone)) {
+      return res.status(400).json({ success: false, message: 'Mobile number must be exactly 10 digits.', errors: { phone: 'Mobile number must be exactly 10 digits.' } })
+    }
+    req.body.phone = phone
+  }
   const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, { returnDocument: 'after', runValidators: true })
   if (!customer) return res.status(404).json({ success: false, message: 'Customer not found', errors: {} })
   res.json({ success: true, message: 'Customer updated', data: customer })

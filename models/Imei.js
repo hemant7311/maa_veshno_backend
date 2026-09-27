@@ -3,7 +3,13 @@ const mongoose = require('mongoose')
 const imeiSchema = new mongoose.Schema(
   {
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true, index: true },
-    imeiNumber: { type: String, required: true, trim: true, unique: true },
+    imeiNumber: { 
+      type: String, 
+      required: true, 
+      trim: true, 
+      unique: true,
+      match: [/^\d{15}$/, 'IMEI must be exactly 15 digits']
+    },
     status: {
       type: String,
       enum: ['available', 'reserved', 'sold', 'returned', 'damaged', 'lost', 'archived'],
