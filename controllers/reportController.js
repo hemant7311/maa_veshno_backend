@@ -24,7 +24,7 @@ const getAllReports = async (req, res) => {
   try {
     const { startDate, endDate } = req.query
     const saleFilter = buildDateFilter(startDate, endDate)
-    saleFilter.status = { $ne: 'cancelled' }
+    saleFilter.status = { $ne: 'cancelled' }; saleFilter.billStatus = { $ne: 'draft' }
     const purchaseFilter = buildDateFilter(startDate, endDate, 'date')
     purchaseFilter.status = { $ne: 'cancelled' }
     const loanFilter = buildDateFilter(startDate, endDate, 'date')

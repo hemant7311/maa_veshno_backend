@@ -118,8 +118,11 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
     const { 
       invoiceNumber, customerName, phone: rawPhone, saleType = 'retail', paymentMode: rawPaymentMode, 
       items, subTotal, totalDiscount, totalTax, gstPercent: inputGstPercent, grandTotal, financeDetails,
-      pickedBy, partyGst, warrantySaleAmount, delayPaymentExpected, amountPaid, promisedDate
+      pickedBy, partyGst, warrantySaleAmount, delayPaymentExpected, amountPaid, promisedDate,
+      isDraft, billStatus: inputBillStatus
     } = req.body
+
+    const isDraftBill = !!(isDraft || inputBillStatus === 'draft')
 
     const phone = normalizeMobile(rawPhone)
     const paymentMode = normalizePaymentMethod(rawPaymentMode || (financeDetails ? 'finance' : 'cash'))
@@ -174,7 +177,7 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
     }
 
     const finalGrandTotal = Math.round(calculatedGrandTotal * 100) / 100
-    let finalAmountPaid = amountPaid !== undefined ? Number(amountPaid) : (paymentMode === 'finance' ? (Number(financeDetails?.dpAmount) || 0) : finalGrandTotal)
+    let finalAmountPaid = isDraftBill ? (amountPaid !== undefined ? Number(amountPaid) : 0) : (amountPaid !== undefined ? Number(amountPaid) : (paymentMode === 'finance' ? (Number(financeDetails?.dpAmount) || 0) : finalGrandTotal))
     if (finalAmountPaid < 0) {
       await session.abortTransaction()
       session.endSession()
@@ -188,7 +191,8 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
 
     const finalAmountDue = Math.round((finalGrandTotal - finalAmountPaid) * 100) / 100
     let billStatus = 'saved'
-    if (finalAmountDue <= 0) billStatus = 'paid'
+    if (isDraftBill) billStatus = 'draft'
+    else if (finalAmountDue <= 0) billStatus = 'paid'
     else if (finalAmountPaid > 0) billStatus = 'partially_paid'
     else billStatus = 'due'
 
@@ -198,16 +202,18 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
       const custData = [{ 
         customerName, phone, 
         customerType: saleType === 'wholesale' ? 'wholesale' : 'retail',
-        totalPurchases: finalGrandTotal,
-        balance: finalAmountDue,
+        totalPurchases: isDraftBill ? 0 : finalGrandTotal,
+        balance: isDraftBill ? 0 : finalAmountDue,
         address: req.body.address || '',
         gstNumber: req.body.partyGst || ''
       }]
       const createdCustomers = await Customer.create(custData, { session, ordered: true })
       customer = createdCustomers[0]
     } else {
-      customer.totalPurchases = (customer.totalPurchases || 0) + finalGrandTotal
-      customer.balance = (customer.balance || 0) + finalAmountDue
+      if (!isDraftBill) {
+        customer.totalPurchases = (customer.totalPurchases || 0) + finalGrandTotal
+        customer.balance = (customer.balance || 0) + finalAmountDue
+      }
       if (saleType === 'wholesale') customer.customerType = 'wholesale'
       if (req.body.address) customer.address = req.body.address
       if (req.body.partyGst) customer.gstNumber = req.body.partyGst
@@ -265,9 +271,10 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
     }
 
     if (imeiList.length > 0) {
+      const imeiStatusToSet = isDraftBill ? 'reserved' : 'sold'
       const imeiResult = await Imei.updateMany(
         { imeiNumber: { $in: imeiList }, status: { $in: ['available', 'sellable', 'Active', 'active'] } },
-        { $set: { status: 'sold', soldAt: new Date() } },
+        { $set: { status: imeiStatusToSet, soldAt: isDraftBill ? null : new Date() } },
         { session }
       )
       if (imeiResult.modifiedCount !== imeiList.length) {
@@ -387,33 +394,35 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
       }
     }
 
-    // 7. Create Financial Transactions
-    const txns = [{
-      transactionType: 'sale',
-      referenceId: sale._id,
-      referenceNumber: sale.invoiceNumber,
-      description: `${saleType.toUpperCase()} Sale to ${customerName} (Invoice #${sale.invoiceNumber})`,
-      amount: finalGrandTotal,
-      paymentMethod: paymentMode,
-      relatedEntity: customerName,
-      transactionDate: new Date(),
-      createdBy: req.user?._id,
-    }]
-    
-    if (finalAmountPaid > 0) {
-      txns.push({
-        transactionType: 'customer_payment',
+    // 7. Create Financial Transactions (only for completed sales, not draft)
+    if (!isDraftBill) {
+      const txns = [{
+        transactionType: 'sale',
         referenceId: sale._id,
         referenceNumber: sale.invoiceNumber,
-        description: `Payment received for Invoice #${sale.invoiceNumber}`,
-        amount: finalAmountPaid,
-        paymentMethod: paymentMode === 'finance' ? 'cash' : paymentMode,
+        description: `${saleType.toUpperCase()} Sale to ${customerName} (Invoice #${sale.invoiceNumber})`,
+        amount: finalGrandTotal,
+        paymentMethod: paymentMode,
         relatedEntity: customerName,
         transactionDate: new Date(),
         createdBy: req.user?._id,
-      })
+      }]
+      
+      if (finalAmountPaid > 0) {
+        txns.push({
+          transactionType: 'customer_payment',
+          referenceId: sale._id,
+          referenceNumber: sale.invoiceNumber,
+          description: `Payment received for Invoice #${sale.invoiceNumber}`,
+          amount: finalAmountPaid,
+          paymentMethod: paymentMode === 'finance' ? 'cash' : paymentMode,
+          relatedEntity: customerName,
+          transactionDate: new Date(),
+          createdBy: req.user?._id,
+        })
+      }
+      await Transaction.create(txns, { session, ordered: true })
     }
-    await Transaction.create(txns, { session, ordered: true })
 
     await session.commitTransaction()
     session.endSession()
@@ -451,7 +460,9 @@ const update = async (req, res) => {
       return res.status(422).json({ success: false, message: 'Cannot edit a cancelled sale', errors: {} })
     }
 
-    const { items, subTotal, totalDiscount, totalTax, gstPercent: inputGstPercent, grandTotal, partyGst, amountPaid, promisedDate } = req.body
+    const { items, subTotal, totalDiscount, totalTax, gstPercent: inputGstPercent, grandTotal, partyGst, amountPaid, promisedDate, isDraft, billStatus: inputBillStatus } = req.body
+    const isUpdatingToDraft = !!(isDraft || inputBillStatus === 'draft')
+    const wasDraft = oldSale.billStatus === 'draft'
 
     // Recalculate totals
     let calcSubTotal = 0
@@ -506,16 +517,18 @@ const update = async (req, res) => {
       return res.status(422).json({ success: false, message: `Cannot reduce bill total below already paid amount (₹${oldSale.amountPaid}). Process a refund first.`, errors: {} })
     }
     const finalAmountDue = Math.round((finalGrandTotal - finalAmountPaid) * 100) / 100
-    let billStatus = 'saved'
-    if (finalAmountDue <= 0) billStatus = 'paid'
-    else if (finalAmountPaid > 0) billStatus = 'partially_paid'
-    else billStatus = 'due'
+    let billStatus = isUpdatingToDraft ? 'draft' : 'saved'
+    if (!isUpdatingToDraft) {
+      if (finalAmountDue <= 0) billStatus = 'paid'
+      else if (finalAmountPaid > 0) billStatus = 'partially_paid'
+      else billStatus = 'due'
+    }
 
     // 1. Reverse old IMEI and stock changes
     const oldImeiList = oldSale.items.map(item => item.imei).filter(Boolean)
     if (oldImeiList.length > 0) {
       const revImei = await Imei.updateMany(
-        { imeiNumber: { $in: oldImeiList }, status: 'sold' }, 
+        { imeiNumber: { $in: oldImeiList }, status: { $in: ['sold', 'reserved'] } }, 
         { $set: { status: 'available', soldAt: null } }, 
         { session }
       )
@@ -539,9 +552,10 @@ const update = async (req, res) => {
     }
 
     if (newImeiList.length > 0) {
+      const targetImeiStatus = isUpdatingToDraft ? 'reserved' : 'sold'
       const imeiResult = await Imei.updateMany(
-        { imeiNumber: { $in: newImeiList }, status: { $in: ['available', 'sellable'] } },
-        { $set: { status: 'sold', soldAt: new Date() } },
+        { imeiNumber: { $in: newImeiList }, status: { $in: ['available', 'sellable', 'Active', 'active'] } },
+        { $set: { status: targetImeiStatus, soldAt: isUpdatingToDraft ? null : new Date() } },
         { session }
       )
       if (imeiResult.modifiedCount !== newImeiList.length) {
@@ -741,7 +755,7 @@ const cancel = async (req, res) => {
     const imeiList = sale.items.map(item => item.imei).filter(Boolean)
     if (imeiList.length > 0) {
       const revImei = await Imei.updateMany(
-        { imeiNumber: { $in: imeiList }, status: 'sold' }, 
+        { imeiNumber: { $in: imeiList }, status: { $in: ['sold', 'reserved'] } }, 
         { $set: { status: 'available', soldAt: null } }, 
         { session }
       )
