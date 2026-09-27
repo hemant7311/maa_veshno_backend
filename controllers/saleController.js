@@ -184,17 +184,17 @@ const create = async (req, res) => {
       await customer.save({ session })
     }
 
-    // 2. Lookup Purchase Prices for items
+    // 2. Authoritative Lookup of Purchase Prices for items from Product Master
     for (const item of items) {
-      if (item.purchasePrice === undefined || item.purchasePrice === null || item.purchasePrice === '') {
-        if (item.productId) {
-          const p = await Product.findById(item.productId).session(session)
-          if (p) item.purchasePrice = p.purchasePrice || p.costPrice || 0
+      if (item.productId) {
+        const p = await Product.findById(item.productId).session(session)
+        if (p) {
+          item.purchasePrice = Number(p.purchasePrice ?? p.costPrice ?? 0)
         } else {
-          item.purchasePrice = 0
+          item.purchasePrice = Number(item.purchasePrice || 0)
         }
       } else {
-        item.purchasePrice = Number(item.purchasePrice) || 0
+        item.purchasePrice = Number(item.purchasePrice || 0)
       }
     }
 
