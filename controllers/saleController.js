@@ -287,7 +287,8 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
       let isUnique = false
       while (!isUnique) {
         const seq = await getNextSequence(counterKey, session)
-        inv = String(seq)
+        const prefix = saleType === 'wholesale' ? 'W-' : 'R-'
+        inv = `${prefix}${String(seq).padStart(6, '0')}`
         const existingSale = await Sale.findOne({ invoiceNumber: inv }).session(session)
         if (!existingSale) {
           isUnique = true
@@ -302,7 +303,8 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
         let isUnique = false
         while (!isUnique) {
           const seq = await getNextSequence(counterKey, session)
-          inv = String(seq)
+          const prefix = saleType === 'wholesale' ? 'W-' : 'R-'
+          inv = `${prefix}${String(seq).padStart(6, '0')}`
           const checkSale = await Sale.findOne({ invoiceNumber: inv }).session(session)
           if (!checkSale) {
             isUnique = true
