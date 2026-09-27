@@ -239,9 +239,6 @@ exports.getFinanceSummary = async (req, res, next) => {
        return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
-    // Auto-sync existing/legacy finance sales into FinanceRecords
-    await syncAllFinanceSales()
-
     const baseFilter = { status: { $nin: ['Cancelled', 'Draft', 'cancelled', 'draft'] } }
     const filter = req.user.role === 'finance_agent'
       ? { ...baseFilter, ...agentFinanceFilter(req.user) }
@@ -297,6 +294,60 @@ exports.getFinanceSummary = async (req, res, next) => {
     }
 
     res.status(200).json({ success: true, data: summary })
+  } catch (error) {
+    next(error)
+  }
+}
+
+exports.getAgentSummary = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'finance_agent') {
+      return res.status(403).json({ success: false, message: 'This endpoint is for finance agents only' })
+    }
+    const filter = agentFinanceFilter(req.user)
+    const records = await FinanceRecord.find(filter)
+
+    const totalCases = records.length
+    const totalFinancedAmount = records.reduce((sum, r) => sum + Number(r.usedLimit || 0), 0)
+    const totalOutstanding = records.reduce((sum, r) => sum + Number(r.availableLimit || 0), 0)
+
+    let activeCases = 0
+    let completedCases = 0
+
+    records.forEach(r => {
+      const tenure = parseInt(r.tenure) || 6
+      const paidCount = (r.paidEmis || []).length
+      if (paidCount >= tenure) {
+        completedCases += 1
+      } else {
+        activeCases += 1
+      }
+    })
+
+    res.json({
+      success: true,
+      data: {
+        totalCases,
+        totalFinancedAmount,
+        totalOutstanding,
+        activeCases,
+        completedCases,
+        recentRecords: records.slice(0, 5)
+      }
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+
+exports.getAgentRecords = async (req, res, next) => {
+  try {
+    if (req.user.role !== 'finance_agent') {
+      return res.status(403).json({ success: false, message: 'This endpoint is for finance agents only' })
+    }
+    const filter = agentFinanceFilter(req.user)
+    const records = await FinanceRecord.find(filter).sort({ createdAt: -1 })
+    res.json({ success: true, data: records })
   } catch (error) {
     next(error)
   }
