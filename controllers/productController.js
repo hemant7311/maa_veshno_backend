@@ -41,8 +41,9 @@ const productData = (body) => {
 }
 
 const list = async (req, res) => {
-  const { search = '' } = req.query
+  const { search = '', inventoryUnits } = req.query
   const trimmedSearch = String(search).trim()
+  const useInventoryUnits = String(inventoryUnits) === 'true'
 
   if (trimmedSearch) {
     const is15DigitImei = /^\d{15}$/.test(trimmedSearch)
@@ -60,9 +61,9 @@ const list = async (req, res) => {
         if (product && product.status !== 'inactive') {
           const prodObj = product.toObject()
           prodObj.imeiNumber = trimmedSearch
+          prodObj.imeiId = imeiDoc._id
           prodObj.categoryName = product.categoryId?.categoryName || ''
-          const availStock = await Imei.countDocuments({ productId: product._id, status: { $in: ['available', 'sellable', 'active'] } })
-          prodObj.stock = availStock > 0 ? availStock : (prodObj.stock || 1)
+          prodObj.stock = 1
           return res.json({ success: true, message: 'Products loaded', data: [prodObj] })
         }
       }
@@ -78,6 +79,7 @@ const list = async (req, res) => {
           const prodObj = directProduct.toObject()
           prodObj.imeiNumber = trimmedSearch
           prodObj.categoryName = directProduct.categoryId?.categoryName || ''
+          prodObj.stock = 1
           return res.json({ success: true, message: 'Products loaded', data: [prodObj] })
         }
       }
@@ -106,6 +108,61 @@ const list = async (req, res) => {
     : {}
 
   const products = await Product.find(filter).populate('categoryId', 'categoryName').sort({ createdAt: -1 })
+
+  if (useInventoryUnits) {
+    const units = []
+    const productIds = products.map(p => p._id)
+
+    const availableImeis = await Imei.find({
+      productId: { $in: productIds },
+      status: { $in: ['available', 'sellable', 'Active', 'active'] }
+    }).sort({ createdAt: 1 })
+
+    const imeisByProductId = new Map()
+    for (const im of availableImeis) {
+      const pKey = String(im.productId)
+      if (!imeisByProductId.has(pKey)) imeisByProductId.set(pKey, [])
+      imeisByProductId.get(pKey).push(im)
+    }
+
+    for (const product of products) {
+      const pKey = String(product._id)
+      const pImeis = imeisByProductId.get(pKey) || []
+
+      if (pImeis.length > 0) {
+        for (const im of pImeis) {
+          units.push({
+            ...product.toObject(),
+            categoryName: product.categoryId?.categoryName || '',
+            imeiNumber: im.imeiNumber,
+            imeiId: im._id,
+            stock: 1
+          })
+        }
+      } else if (product.imeiNumber) {
+        const isSold = await Imei.exists({ imeiNumber: product.imeiNumber, status: { $in: ['sold', 'archived', 'damaged', 'lost', 'returned'] } })
+        if (!isSold) {
+          units.push({
+            ...product.toObject(),
+            categoryName: product.categoryId?.categoryName || '',
+            imeiNumber: product.imeiNumber,
+            stock: 1
+          })
+        }
+      } else {
+        if ((product.stock || 0) > 0) {
+          units.push({
+            ...product.toObject(),
+            categoryName: product.categoryId?.categoryName || '',
+            imeiNumber: '—',
+            stock: product.stock || 0
+          })
+        }
+      }
+    }
+    return res.json({ success: true, message: 'Inventory units loaded', data: units })
+  }
+
   res.json({ success: true, message: 'Products loaded', data: await withImeiStock(products) })
 }
 

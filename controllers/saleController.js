@@ -233,7 +233,26 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
     }
 
     // 3. Validate and reserve IMEIs before sale
-    const imeiList = items.map(item => item.imei).filter(Boolean)
+    for (const item of items) {
+      if (item.imei && item.imei !== 'N/A' && item.imei !== '—' && String(item.imei).trim() !== '') {
+        const cleanImei = String(item.imei).trim()
+        const imeiDoc = await Imei.findOne({ imeiNumber: cleanImei }).session(session)
+        if (imeiDoc) {
+          if (imeiDoc.status !== 'available' && imeiDoc.status !== 'sellable' && imeiDoc.status !== 'Active' && imeiDoc.status !== 'active') {
+            await session.abortTransaction()
+            session.endSession()
+            return res.status(422).json({ success: false, message: `IMEI ${cleanImei} is not available for sale (Status: ${imeiDoc.status}).`, errors: {} })
+          }
+          if (item.productId && String(imeiDoc.productId) !== String(item.productId)) {
+            await session.abortTransaction()
+            session.endSession()
+            return res.status(422).json({ success: false, message: `IMEI ${cleanImei} does not belong to the selected product.`, errors: {} })
+          }
+        }
+      }
+    }
+
+    const imeiList = items.map(item => item.imei).filter(im => im && im !== 'N/A' && im !== '—' && String(im).trim() !== '')
     const uniqueImeis = new Set(imeiList)
     if (uniqueImeis.size !== imeiList.length) {
       await session.abortTransaction()
@@ -243,7 +262,7 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
 
     if (imeiList.length > 0) {
       const imeiResult = await Imei.updateMany(
-        { imeiNumber: { $in: imeiList }, status: { $in: ['available', 'sellable'] } },
+        { imeiNumber: { $in: imeiList }, status: { $in: ['available', 'sellable', 'Active', 'active'] } },
         { $set: { status: 'sold', soldAt: new Date() } },
         { session }
       )
