@@ -42,10 +42,66 @@ const productData = (body) => {
 
 const list = async (req, res) => {
   const { search = '' } = req.query
-  const imeiProductIds = search ? await Imei.find({ imeiNumber: new RegExp(search, 'i'), status: { $ne: 'archived' } }).distinct('productId') : []
-  const filter = search
-    ? { $or: [{ productName: new RegExp(search, 'i') }, { brand: new RegExp(search, 'i') }, { model: new RegExp(search, 'i') }, { barcode: new RegExp(search, 'i') }, { imeiNumber: new RegExp(search, 'i') }, { _id: { $in: imeiProductIds } }] }
+  const trimmedSearch = String(search).trim()
+
+  if (trimmedSearch) {
+    const is15DigitImei = /^\d{15}$/.test(trimmedSearch)
+
+    if (is15DigitImei) {
+      // 1. Search in Imei collection for available IMEI matching exact 15 digits
+      const imeiDoc = await Imei.findOne({
+        imeiNumber: trimmedSearch,
+        status: { $in: ['available', 'sellable', 'Active'] }
+      }).populate({
+        path: 'productId',
+        populate: { path: 'categoryId', select: 'categoryName' }
+      })
+
+      if (imeiDoc && imeiDoc.productId) {
+        const prodObj = imeiDoc.productId.toObject()
+        prodObj.imeiNumber = trimmedSearch
+        const availStock = await Imei.countDocuments({ productId: imeiDoc.productId._id, status: 'available' })
+        prodObj.stock = availStock > 0 ? availStock : (prodObj.stock || 1)
+        return res.json({ success: true, message: 'Products loaded', data: [prodObj] })
+      }
+
+      // 2. Check Product model direct imeiNumber field
+      const directProduct = await Product.findOne({ imeiNumber: trimmedSearch }).populate('categoryId', 'categoryName')
+      if (directProduct) {
+        const isSoldOrArchived = await Imei.exists({
+          imeiNumber: trimmedSearch,
+          status: { $in: ['sold', 'archived', 'damaged', 'lost', 'returned'] }
+        })
+        if (!isSoldOrArchived) {
+          const prodObj = directProduct.toObject()
+          prodObj.imeiNumber = trimmedSearch
+          return res.json({ success: true, message: 'Products loaded', data: [prodObj] })
+        }
+      }
+
+      // If a 15-digit IMEI was searched but no available stock matching this exact IMEI exists, return empty list
+      return res.json({ success: true, message: 'Products loaded', data: [] })
+    }
+  }
+
+  // General text / Barcode search
+  const imeiProductIds = trimmedSearch
+    ? await Imei.find({ imeiNumber: new RegExp(trimmedSearch, 'i'), status: { $ne: 'archived' } }).distinct('productId')
+    : []
+
+  const filter = trimmedSearch
+    ? {
+        $or: [
+          { productName: new RegExp(trimmedSearch, 'i') },
+          { brand: new RegExp(trimmedSearch, 'i') },
+          { model: new RegExp(trimmedSearch, 'i') },
+          { barcode: new RegExp(trimmedSearch, 'i') },
+          { imeiNumber: new RegExp(trimmedSearch, 'i') },
+          { _id: { $in: imeiProductIds } }
+        ]
+      }
     : {}
+
   const products = await Product.find(filter).populate('categoryId', 'categoryName').sort({ createdAt: -1 })
   res.json({ success: true, message: 'Products loaded', data: await withImeiStock(products) })
 }
