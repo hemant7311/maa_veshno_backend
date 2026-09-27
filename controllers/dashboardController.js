@@ -172,7 +172,9 @@ const summary = async (req, res) => {
     })
 
     const mapSale = (sale) => ({
+      _id: sale._id,
       id: sale.invoiceNumber || sale._id,
+      invoiceNumber: sale.invoiceNumber,
       customer: sale.customerName || 'Retail Customer',
       phone: sale.phone || '—',
       date: sale.createdAt ? new Date(sale.createdAt).toISOString() : new Date().toISOString(),

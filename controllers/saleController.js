@@ -89,7 +89,13 @@ const list = async (req, res) => {
 
 const getOne = async (req, res) => {
   try {
-    const sale = await Sale.findById(req.params.id)
+    let sale = null
+    if (mongoose.Types.ObjectId.isValid(req.params.id)) {
+      sale = await Sale.findById(req.params.id)
+    }
+    if (!sale) {
+      sale = await Sale.findOne({ invoiceNumber: req.params.id })
+    }
     if (!sale) return res.status(404).json({ success: false, message: 'Sale not found', errors: {} })
     res.json({ success: true, message: 'Sale loaded', data: sale })
   } catch (error) {
@@ -354,7 +360,13 @@ const update = async (req, res) => {
   session.startTransaction()
   try {
     const saleId = req.params.id
-    const oldSale = await Sale.findById(saleId).session(session)
+    let oldSale = null
+    if (mongoose.Types.ObjectId.isValid(saleId)) {
+      oldSale = await Sale.findById(saleId).session(session)
+    }
+    if (!oldSale) {
+      oldSale = await Sale.findOne({ invoiceNumber: saleId }).session(session)
+    }
     
     if (!oldSale) {
       await session.abortTransaction()
@@ -563,7 +575,13 @@ const cancel = async (req, res) => {
   session.startTransaction()
   try {
     const saleId = req.params.id
-    const sale = await Sale.findById(saleId).session(session)
+    let sale = null
+    if (mongoose.Types.ObjectId.isValid(saleId)) {
+      sale = await Sale.findById(saleId).session(session)
+    }
+    if (!sale) {
+      sale = await Sale.findOne({ invoiceNumber: saleId }).session(session)
+    }
     
     if (!sale) {
       await session.abortTransaction()
