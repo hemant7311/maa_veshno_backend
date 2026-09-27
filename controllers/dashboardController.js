@@ -200,6 +200,13 @@ const summary = async (req, res) => {
       .slice(0, 10)
 
     const invSummaryObj = Array.isArray(inventorySummary) && inventorySummary.length > 0 ? inventorySummary[0] : {}
+    const totalProductStockAgg = await Product.aggregate([
+      { $match: { status: 'active' } },
+      { $group: { _id: null, totalStock: { $sum: '$stock' } } }
+    ]).catch(() => [])
+    const totalProductStockSum = Number(totalProductStockAgg[0]?.totalStock) || 0
+    const availableImeiCount = await Imei.countDocuments({ status: 'available' }).catch(() => 0)
+    const currentTotalStock = Math.max(totalProductStockSum, availableImeiCount, Number(invSummaryObj?.stock) || 0)
 
     const safeTodaySales = Array.isArray(todaySales) ? todaySales : []
     const safeAllSalesList = Array.isArray(allSales) ? allSales : []
@@ -211,8 +218,9 @@ const summary = async (req, res) => {
       data: {
         productCount: Number(productCount) || 0,
         customerCount: Number(customerCount) || 0,
-        stock: Number(invSummaryObj?.stock) || 0,
-        availableImeis: Number(invSummaryObj?.stock) || 0,
+        stock: currentTotalStock,
+        totalStock: currentTotalStock,
+        availableImeis: availableImeiCount,
         purchaseValue: Number(invSummaryObj?.purchaseValue) || 0,
         saleValue: Number(invSummaryObj?.saleValue) || 0,
         potentialProfit: (Number(invSummaryObj?.saleValue) || 0) - (Number(invSummaryObj?.purchaseValue) || 0),
@@ -255,7 +263,7 @@ const summary = async (req, res) => {
         todayGrossFinanceProfit: Math.round(today.grossFinanceProfit),
 
         // Today Stock In & Returns
-        todayStockIn,
+        todayStockIn: currentTotalStock,
         todayReturnsCount,
         todayReturnsAmount,
 
