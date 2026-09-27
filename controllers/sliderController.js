@@ -15,15 +15,36 @@ const deletePhysicalFile = (mediaUrl) => {
   }
 }
 
+// Public list for storefronts with audience filtering
 exports.list = async (req, res) => {
   try {
-    const sliders = await Slider.find({ isActive: true }).sort('order createdAt')
+    const { audience } = req.query
+    const filter = { isActive: true }
+
+    if (audience === 'retailer') {
+      filter.$or = [
+        { targetAudience: 'retailer' },
+        { targetAudience: 'both' },
+        { targetAudience: { $exists: false } },
+        { targetAudience: null }
+      ]
+    } else if (audience === 'wholesaler') {
+      filter.$or = [
+        { targetAudience: 'wholesaler' },
+        { targetAudience: 'both' },
+        { targetAudience: { $exists: false } },
+        { targetAudience: null }
+      ]
+    }
+
+    const sliders = await Slider.find(filter).sort('order createdAt')
     res.json({ success: true, data: sliders })
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to list sliders', errors: { error: err.message } })
   }
 }
 
+// Admin list for management table
 exports.listAdmin = async (req, res) => {
   try {
     const sliders = await Slider.find().sort('order createdAt')
@@ -33,11 +54,32 @@ exports.listAdmin = async (req, res) => {
   }
 }
 
+// Get single slider
+exports.getById = async (req, res) => {
+  try {
+    const slider = await Slider.findById(req.params.id)
+    if (!slider) return res.status(404).json({ success: false, message: 'Slider not found', errors: {} })
+    res.json({ success: true, data: slider })
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Failed to get slider', errors: { error: err.message } })
+  }
+}
+
+// Create slide
 exports.create = async (req, res) => {
   try {
-    let { title, subtitle, mediaUrl, mediaType, isActive, order } = req.body
+    let {
+      title,
+      subtitle,
+      mediaUrl,
+      mediaType,
+      targetAudience,
+      buttonText,
+      buttonLink,
+      isActive,
+      order
+    } = req.body
 
-    // Handle file upload if present via multer
     if (req.file) {
       mediaUrl = `/uploads/sliders/${req.file.filename}`
       const ext = path.extname(req.file.filename).toLowerCase()
@@ -53,11 +95,16 @@ exports.create = async (req, res) => {
     }
 
     const slider = await Slider.create({
-      title,
-      subtitle: subtitle || '',
+      title: title.trim(),
+      subtitle: (subtitle || '').trim(),
       mediaUrl,
+      imageUrl: mediaType === 'image' ? mediaUrl : '',
+      videoUrl: mediaType === 'video' ? mediaUrl : '',
       mediaType: mediaType || 'image',
-      isActive: isActive !== undefined ? Boolean(isActive) : true,
+      targetAudience: ['retailer', 'wholesaler', 'both'].includes(targetAudience) ? targetAudience : 'both',
+      buttonText: (buttonText || '').trim(),
+      buttonLink: (buttonLink || '').trim(),
+      isActive: isActive !== undefined ? Boolean(isActive === 'true' || isActive === true) : true,
       order: Number(order) || 0
     })
 
@@ -67,12 +114,23 @@ exports.create = async (req, res) => {
   }
 }
 
+// Update slide
 exports.update = async (req, res) => {
   try {
     const oldSlider = await Slider.findById(req.params.id)
     if (!oldSlider) return res.status(404).json({ success: false, message: 'Slider not found', errors: {} })
 
-    let { title, subtitle, mediaUrl, mediaType, isActive, order } = req.body
+    let {
+      title,
+      subtitle,
+      mediaUrl,
+      mediaType,
+      targetAudience,
+      buttonText,
+      buttonLink,
+      isActive,
+      order
+    } = req.body
 
     if (req.file) {
       const newMediaUrl = `/uploads/sliders/${req.file.filename}`
@@ -90,16 +148,26 @@ exports.update = async (req, res) => {
       deletePhysicalFile(oldSlider.mediaUrl)
     }
 
+    const updateFields = {}
+    if (title !== undefined) updateFields.title = title.trim()
+    if (subtitle !== undefined) updateFields.subtitle = subtitle.trim()
+    if (mediaUrl !== undefined) {
+      updateFields.mediaUrl = mediaUrl
+      if (mediaType === 'image') updateFields.imageUrl = mediaUrl
+      if (mediaType === 'video') updateFields.videoUrl = mediaUrl
+    }
+    if (mediaType !== undefined) updateFields.mediaType = mediaType
+    if (targetAudience !== undefined && ['retailer', 'wholesaler', 'both'].includes(targetAudience)) {
+      updateFields.targetAudience = targetAudience
+    }
+    if (buttonText !== undefined) updateFields.buttonText = buttonText.trim()
+    if (buttonLink !== undefined) updateFields.buttonLink = buttonLink.trim()
+    if (isActive !== undefined) updateFields.isActive = Boolean(isActive === 'true' || isActive === true)
+    if (order !== undefined) updateFields.order = Number(order)
+
     const updatedSlider = await Slider.findByIdAndUpdate(
       req.params.id,
-      {
-        ...(title !== undefined && { title }),
-        ...(subtitle !== undefined && { subtitle }),
-        ...(mediaUrl !== undefined && { mediaUrl }),
-        ...(mediaType !== undefined && { mediaType }),
-        ...(isActive !== undefined && { isActive: Boolean(isActive) }),
-        ...(order !== undefined && { order: Number(order) })
-      },
+      updateFields,
       { new: true, runValidators: true }
     )
 
@@ -109,6 +177,7 @@ exports.update = async (req, res) => {
   }
 }
 
+// Delete slide
 exports.remove = async (req, res) => {
   try {
     const slider = await Slider.findById(req.params.id)
