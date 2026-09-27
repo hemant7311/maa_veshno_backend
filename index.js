@@ -159,6 +159,8 @@ const migrateDatabase = async () => {
 connectDatabase()
   .then(() => {
     console.log('✅ MongoDB connected')
+    const { ensureHiteshAgentAccount } = require('./config/ensureAgent')
+    ensureHiteshAgentAccount().catch(err => console.warn('Hitesh agent account setup warning:', err.message))
     const { migrateLegacyFinanceRecords } = require('./utils/financeSync')
     migrateLegacyFinanceRecords().catch(err => console.warn('Legacy finance migration warning:', err.message))
   })

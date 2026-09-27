@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const User = require('../models/User')
+const { JWT_SECRET } = require('../config/jwt')
 
 const publicUser = (user) => ({
   id: user._id,
@@ -63,8 +64,8 @@ const login = async (req, res) => {
 
   user.lastLogin = new Date()
   await user.save()
-  const secret = process.env.JWT_SECRET || 'MaaVeshno_Fallback_Secret_Key_2026'
-  const token = jwt.sign({ userId: user._id, role: user.role, permissions: user.permissions }, secret, { expiresIn: '7d' })
+
+  const token = jwt.sign({ userId: user._id, role: user.role, permissions: user.permissions }, JWT_SECRET, { expiresIn: '7d' })
   return res.json({ success: true, message: 'Login successful', data: { user: publicUser(user), token } })
 }
 
@@ -83,11 +84,17 @@ const getUsers = async (req, res) => {
 const updateUser = async (req, res) => {
   const { id } = req.params
   const { name, username, role, password, permissions } = req.body
-  const updateData = { name, username, role, permissions }
+  const updateData = {}
+  if (name) updateData.name = name.trim()
+  if (username) updateData.username = normalizeUsername(username)
+  if (role) updateData.role = role
+  if (permissions) updateData.permissions = permissions
   
   if (password && password.trim() !== '') {
-    const salt = await bcrypt.genSalt(10)
-    updateData.password = await bcrypt.hash(password, salt)
+    if (password.trim().length < 6) {
+      return res.status(422).json({ success: false, message: 'Password must be at least 6 characters long', errors: {} })
+    }
+    updateData.password = await bcrypt.hash(password.trim(), 12)
   }
 
   const updatedUser = await User.findByIdAndUpdate(id, updateData, { new: true })
@@ -96,10 +103,26 @@ const updateUser = async (req, res) => {
   res.json({ success: true, message: 'User updated successfully', data: publicUser(updatedUser) })
 }
 
+const resetPassword = async (req, res) => {
+  const { id } = req.params
+  const { newPassword } = req.body
+
+  if (typeof newPassword !== 'string' || newPassword.length < 6) {
+    return res.status(422).json({ success: false, message: 'Password must be at least 6 characters long', errors: {} })
+  }
+
+  const hashedPassword = await bcrypt.hash(newPassword, 12)
+  const user = await User.findByIdAndUpdate(id, { password: hashedPassword }, { new: true })
+  if (!user) {
+    return res.status(404).json({ success: false, message: 'User not found', errors: {} })
+  }
+
+  return res.json({ success: true, message: `Password for user ${user.username} reset successfully`, data: publicUser(user) })
+}
+
 const deleteUser = async (req, res) => {
   const { id } = req.params
-  // Optional: Prevent deleting the last admin or self
-  if (id === req.user.id) {
+  if (id === String(req.user.id || req.user._id)) {
     return res.status(400).json({ success: false, message: 'Cannot delete your own account' })
   }
   
@@ -109,4 +132,4 @@ const deleteUser = async (req, res) => {
   res.json({ success: true, message: 'User deleted successfully' })
 }
 
-module.exports = { login, profile, register, getAgents, getUsers, updateUser, deleteUser }
+module.exports = { login, profile, register, getAgents, getUsers, updateUser, resetPassword, deleteUser }
