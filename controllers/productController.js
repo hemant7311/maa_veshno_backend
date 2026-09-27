@@ -48,26 +48,28 @@ const list = async (req, res) => {
     const is15DigitImei = /^\d{15}$/.test(trimmedSearch)
 
     if (is15DigitImei) {
-      // 1. Search in Imei collection for available IMEI matching exact 15 digits
+      // 1. Search in Imei collection for available/sellable IMEI matching exact 15 digits
       const imeiDoc = await Imei.findOne({
         imeiNumber: trimmedSearch,
-        status: { $in: ['available', 'sellable', 'Active'] }
-      }).populate({
-        path: 'productId',
-        populate: { path: 'categoryId', select: 'categoryName' }
+        status: { $in: ['available', 'sellable', 'Active', 'active'] }
       })
 
       if (imeiDoc && imeiDoc.productId) {
-        const prodObj = imeiDoc.productId.toObject()
-        prodObj.imeiNumber = trimmedSearch
-        const availStock = await Imei.countDocuments({ productId: imeiDoc.productId._id, status: 'available' })
-        prodObj.stock = availStock > 0 ? availStock : (prodObj.stock || 1)
-        return res.json({ success: true, message: 'Products loaded', data: [prodObj] })
+        const targetProductId = imeiDoc.productId._id || imeiDoc.productId
+        const product = await Product.findById(targetProductId).populate('categoryId', 'categoryName')
+        if (product && product.status !== 'inactive') {
+          const prodObj = product.toObject()
+          prodObj.imeiNumber = trimmedSearch
+          prodObj.categoryName = product.categoryId?.categoryName || ''
+          const availStock = await Imei.countDocuments({ productId: product._id, status: { $in: ['available', 'sellable', 'active'] } })
+          prodObj.stock = availStock > 0 ? availStock : (prodObj.stock || 1)
+          return res.json({ success: true, message: 'Products loaded', data: [prodObj] })
+        }
       }
 
       // 2. Check Product model direct imeiNumber field
       const directProduct = await Product.findOne({ imeiNumber: trimmedSearch }).populate('categoryId', 'categoryName')
-      if (directProduct) {
+      if (directProduct && directProduct.status !== 'inactive') {
         const isSoldOrArchived = await Imei.exists({
           imeiNumber: trimmedSearch,
           status: { $in: ['sold', 'archived', 'damaged', 'lost', 'returned'] }
@@ -75,6 +77,7 @@ const list = async (req, res) => {
         if (!isSoldOrArchived) {
           const prodObj = directProduct.toObject()
           prodObj.imeiNumber = trimmedSearch
+          prodObj.categoryName = directProduct.categoryId?.categoryName || ''
           return res.json({ success: true, message: 'Products loaded', data: [prodObj] })
         }
       }
