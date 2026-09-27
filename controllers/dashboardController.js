@@ -39,7 +39,13 @@ const summary = async (req, res) => {
         { $group: { _id: null, stock: { $sum: 1 }, purchaseValue: { $sum: '$product.purchasePrice' }, saleValue: { $sum: '$product.salePrice' } } },
       ]).catch(() => []),
       Sale.find({ status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean().catch(() => []),
-      Sale.find({ createdAt: { $gte: dayStart, $lte: dayEnd }, status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean().catch(() => []),
+      Sale.find({
+        $or: [
+          { date: { $gte: dayStart, $lte: dayEnd } },
+          { createdAt: { $gte: dayStart, $lte: dayEnd } }
+        ],
+        status: { $ne: 'cancelled' }
+      }).sort({ createdAt: -1 }).lean().catch(() => []),
       Purchase.find({ status: { $ne: 'cancelled' } }).lean().catch(() => []),
       Purchase.find({
         $or: [
