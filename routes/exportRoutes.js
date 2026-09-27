@@ -2,7 +2,6 @@ const express = require('express')
 const controller = require('../controllers/exportController')
 const asyncHandler = require('../middleware/asyncHandler')
 const requireAuth = require('../middleware/auth')
-
 const { requireAdmin } = require('../middleware/authorize')
 
 const router = express.Router()
@@ -21,5 +20,9 @@ router.get('/customer-receivables', asyncHandler(controller.exportCustomerReceiv
 router.get('/company-returns', asyncHandler(controller.exportCompanyReturns))
 router.get('/company-returns/mobile', asyncHandler(controller.exportCompanyReturnsByMobile))
 router.get('/full-backup', asyncHandler(controller.fullBackup))
+router.get('/full-backup-zip', asyncHandler(controller.exportFullBackupZip))
+router.get('/custom', asyncHandler(controller.exportCustomBackup))
+router.post('/custom', asyncHandler(controller.exportCustomBackup))
+router.get('/database-dump', asyncHandler(controller.exportDatabaseDump))
 
 module.exports = router
