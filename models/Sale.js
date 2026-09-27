@@ -46,6 +46,7 @@ const saleSchema = new mongoose.Schema(
       dpAmount: { type: Number, default: 0 },
       emiAmount: { type: Number, default: 0 },
       tenure: { type: String, default: '' },
+      emiStartAfterMonths: { type: Number, default: 1, min: 0 },
       emiPayDate: { type: Date, default: null },
       agentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
     },

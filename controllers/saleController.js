@@ -10,6 +10,17 @@ const { getNextSequence } = require('../utils/counter')
 const { getFinancialYear } = require('../utils/financialYear')
 const { normalizePaymentMethod } = require('../utils/paymentMapper')
 
+function addMonthsClamped(date, months) {
+  const d = new Date(date)
+  if (isNaN(d.getTime())) return new Date()
+  const day = d.getDate()
+  d.setDate(1)
+  d.setMonth(d.getMonth() + months)
+  const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
+  d.setDate(Math.min(day, lastDay))
+  return d
+}
+
 /**
  * Generate EMI Installment Schedule
  */
@@ -18,23 +29,16 @@ function generateInstallmentSchedule(firstEmiDate, emiAmount, tenureStr) {
   const amount = Number(emiAmount) || 0
   const schedule = []
 
-  const baseDate = firstEmiDate ? new Date(firstEmiDate) : new Date()
+  const baseDate = firstEmiDate ? new Date(firstEmiDate) : addMonthsClamped(new Date(), 1)
   if (isNaN(baseDate.getTime())) {
     baseDate.setTime(Date.now())
   }
-  const originalDay = baseDate.getDate()
 
   const today = new Date()
   today.setHours(0, 0, 0, 0)
 
   for (let i = 1; i <= tenureMonths; i++) {
-    const dueDate = new Date(baseDate)
-    // Add (i - 1) months
-    dueDate.setMonth(baseDate.getMonth() + (i - 1))
-    // Handle month-end fallback if day overflows
-    if (dueDate.getDate() !== originalDay) {
-      dueDate.setDate(0) // Last day of previous month
-    }
+    const dueDate = addMonthsClamped(baseDate, i - 1)
     dueDate.setHours(0, 0, 0, 0)
 
     let status = 'pending'
@@ -310,8 +314,27 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
     // 5. Generate Installment Schedule if Finance Sale
     let installmentSchedule = []
     if (paymentMode === 'finance' && financeDetails) {
+      const saleCreationDate = new Date()
+      const months = Number(financeDetails.emiStartAfterMonths)
+      let firstEmiDate = null
+
+      if (!isNaN(months) && months >= 1) {
+        firstEmiDate = addMonthsClamped(saleCreationDate, months)
+        financeDetails.emiStartAfterMonths = months
+      } else if (financeDetails.emiPayDate) {
+        firstEmiDate = new Date(financeDetails.emiPayDate)
+        if (isNaN(firstEmiDate.getTime())) {
+          firstEmiDate = addMonthsClamped(saleCreationDate, 1)
+        }
+      } else {
+        firstEmiDate = addMonthsClamped(saleCreationDate, 1)
+        financeDetails.emiStartAfterMonths = 1
+      }
+
+      financeDetails.emiPayDate = firstEmiDate
+
       installmentSchedule = generateInstallmentSchedule(
-        financeDetails.emiPayDate,
+        firstEmiDate,
         financeDetails.emiAmount,
         financeDetails.tenure
       )
@@ -638,11 +661,36 @@ const update = async (req, res) => {
     if (req.body.financeDetails) {
       oldSale.financeDetails = req.body.financeDetails
       if (oldSale.paymentMode === 'finance') {
-        oldSale.installmentSchedule = generateInstallmentSchedule(
-          req.body.financeDetails.emiPayDate,
-          req.body.financeDetails.emiAmount,
-          req.body.financeDetails.tenure
-        )
+        const existingSchedule = oldSale.installmentSchedule || []
+        const hasPaidEntries = existingSchedule.some(ins => (ins.paidAmount && ins.paidAmount > 0) || ins.status === 'paid' || ins.status === 'partial')
+
+        if (hasPaidEntries) {
+          const newEmiAmount = Number(req.body.financeDetails.emiAmount) || 0
+          for (const ins of oldSale.installmentSchedule) {
+            if (ins.status !== 'paid' && ins.status !== 'partial' && (ins.paidAmount || 0) === 0) {
+              ins.dueAmount = newEmiAmount
+            }
+          }
+        } else {
+          const baseDate = oldSale.createdAt || new Date()
+          const months = Number(req.body.financeDetails.emiStartAfterMonths)
+          let firstEmiDate = null
+
+          if (!isNaN(months) && months >= 1) {
+            firstEmiDate = addMonthsClamped(baseDate, months)
+          } else if (req.body.financeDetails.emiPayDate) {
+            firstEmiDate = new Date(req.body.financeDetails.emiPayDate)
+          } else {
+            firstEmiDate = addMonthsClamped(baseDate, 1)
+          }
+
+          oldSale.financeDetails.emiPayDate = firstEmiDate
+          oldSale.installmentSchedule = generateInstallmentSchedule(
+            firstEmiDate,
+            req.body.financeDetails.emiAmount,
+            req.body.financeDetails.tenure
+          )
+        }
       }
     }
     oldSale.warrantySaleAmount = calcWarranty
