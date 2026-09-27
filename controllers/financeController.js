@@ -440,6 +440,16 @@ exports.updateEmiStatus = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Finance record not found' })
     }
 
+    if (req.user && req.user.role === 'finance_agent') {
+      const isOwner = (record.agentId && String(record.agentId) === String(req.user._id)) ||
+        (record.entityName && req.user.financeEntityName && String(record.entityName).trim().toLowerCase() === String(req.user.financeEntityName).trim().toLowerCase())
+      if (!isOwner) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(403).json({ success: false, message: 'Access denied: You are not authorized to update this finance record' });
+      }
+    }
+
     if (!record.installments || record.installments.length === 0) {
       const schedule = generateEmiSchedule(record.tenure, record.emiAmount, record.createdAt || new Date(), 1);
       (record.paidEmis || []).forEach(paidId => {

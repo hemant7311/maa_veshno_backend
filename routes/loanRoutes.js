@@ -2,9 +2,10 @@ const express = require('express')
 const controller = require('../controllers/loanController')
 const asyncHandler = require('../middleware/asyncHandler')
 const requireAuth = require('../middleware/auth')
+const { requirePermission } = require('../middleware/authorize')
 
 const router = express.Router()
-router.use(requireAuth)
+router.use(requireAuth, requirePermission('finance'))
 
 router.get('/', asyncHandler(controller.getAllLoans))
 router.get('/summary', asyncHandler(controller.getLoanSummary))

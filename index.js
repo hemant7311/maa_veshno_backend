@@ -31,7 +31,20 @@ const { requireAdmin, requirePermission } = require('./middleware/authorize')
 const app = express()
 const port = process.env.PORT || 5000
 
-app.use(cors({ origin: process.env.CLIENT_ORIGIN?.split(',') || true }))
+const allowedOrigins = process.env.CLIENT_ORIGIN
+  ? process.env.CLIENT_ORIGIN.split(',').map(o => o.trim())
+  : ['http://localhost:5173', 'http://localhost:3000', 'https://mvmshop.store']
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin) || process.env.NODE_ENV !== 'production') {
+      callback(null, true)
+    } else {
+      callback(new Error('CORS policy: Not allowed by origin'))
+    }
+  },
+  credentials: true
+}))
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ limit: '50mb', extended: true }))
 
@@ -47,20 +60,19 @@ if (!fs.existsSync(billsUploadDir)) fs.mkdirSync(billsUploadDir, { recursive: tr
 app.use('/uploads', express.static(uploadsDir))
 
 app.get('/api/health', (req, res) => {
-
   res.json({ message: 'Backend is connected', status: 'ok' })
 })
 
 app.use('/api/v1/auth', authRoutes)
 app.use('/api/v1/sliders', sliderRoutes)
-app.use('/api/v1/categories', requireAuth, requirePermission('categories'), categoryRoutes)
+app.use('/api/v1/categories', categoryRoutes)
 app.use('/api/v1/products', productRoutes)
-app.use('/api/v1/imeis', requireAuth, requirePermission('imeis'), imeiRoutes)
-app.use('/api/v1/customers', requireAuth, requirePermission('customers'), customerRoutes)
-app.use('/api/v1/dashboard', requireAuth, requirePermission('dashboard'), dashboardRoutes)
-app.use('/api/v1/suppliers', requireAuth, requirePermission('suppliers'), supplierRoutes)
+app.use('/api/v1/imeis', imeiRoutes)
+app.use('/api/v1/customers', customerRoutes)
+app.use('/api/v1/dashboard', dashboardRoutes)
+app.use('/api/v1/suppliers', supplierRoutes)
 app.use('/api/v1/finance', financeRoutes)
-app.use('/api/v1/sales', requireAuth, requirePermission('billing'), saleRoutes)
+app.use('/api/v1/sales', saleRoutes)
 app.use('/api/v1/loans', loanRoutes)
 app.use('/api/v1/customer-receivables', customerReceivableRoutes)
 app.use('/api/v1/purchases', purchaseRoutes)
@@ -84,10 +96,12 @@ app.use((error, req, res, next) => {
   }
   console.error('⚠️ ERROR:', error.message)
   console.error('   Stack:', error.stack)
+
+  const isProd = process.env.NODE_ENV === 'production'
   return res.status(500).json({ 
     success: false, 
     message: 'Internal server error', 
-    errors: { details: error.message, stack: error.stack } 
+    errors: isProd ? {} : { details: error.message, stack: error.stack } 
   })
 })
 
