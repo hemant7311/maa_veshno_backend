@@ -3,12 +3,14 @@ const Customer = require('../models/Customer')
 const Imei = require('../models/Imei')
 const Product = require('../models/Product')
 const Transaction = require('../models/Transaction')
+const FinanceRecord = require('../models/FinanceRecord')
 const mongoose = require('mongoose')
 const fs = require('fs')
 const path = require('path')
 const { getNextSequence } = require('../utils/counter')
 const { getFinancialYear } = require('../utils/financialYear')
 const { normalizePaymentMethod } = require('../utils/paymentMapper')
+const { syncFinanceRecordFromSale } = require('../utils/financeSync')
 
 function addMonthsClamped(date, months) {
   const d = new Date(date)
@@ -424,6 +426,8 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
       await Transaction.create(txns, { session, ordered: true })
     }
 
+    await syncFinanceRecordFromSale(sale, session)
+
     await session.commitTransaction()
     session.endSession()
 
@@ -717,6 +721,8 @@ const update = async (req, res) => {
     if (promisedDate !== undefined) oldSale.promisedDate = promisedDate ? new Date(promisedDate) : null
     await oldSale.save({ session })
 
+    await syncFinanceRecordFromSale(oldSale, session)
+
     await session.commitTransaction()
     session.endSession()
     res.json({ success: true, message: 'Sale updated successfully', data: oldSale })
@@ -802,6 +808,8 @@ const cancel = async (req, res) => {
     if (cancelTxns.length > 0) {
       await Transaction.create(cancelTxns, { session, ordered: true })
     }
+
+    await syncFinanceRecordFromSale(sale, session)
 
     await session.commitTransaction()
     session.endSession()
@@ -1280,6 +1288,8 @@ const convertDraft = async (req, res) => {
     sale.amountDue = amountDue
     await sale.save({ session })
 
+    await syncFinanceRecordFromSale(sale, session)
+
     await session.commitTransaction()
     session.endSession()
     res.json({ success: true, message: `Draft ${sale.invoiceNumber} converted to final bill successfully.`, data: sale })
@@ -1331,7 +1341,10 @@ const deleteDraft = async (req, res) => {
       }
     }
 
-    // 3. Delete sale document permanently
+    // 3. Delete FinanceRecord if present
+    await FinanceRecord.deleteMany({ $or: [{ saleId: sale._id }, { billRef: sale.invoiceNumber }] }, { session })
+
+    // 4. Delete sale document permanently
     await Sale.findByIdAndDelete(sale._id).session(session)
 
     await session.commitTransaction()

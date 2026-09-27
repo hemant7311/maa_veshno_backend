@@ -1,13 +1,15 @@
 const FinanceRecord = require('../models/FinanceRecord')
 const User = require('../models/User')
+const Sale = require('../models/Sale')
 const Transaction = require('../models/Transaction')
 const bcrypt = require('bcryptjs')
 const crypto = require('crypto')
 const mongoose = require('mongoose')
 const { generateEmiSchedule } = require('../utils/financeUtils')
+const { syncAllFinanceSales } = require('../utils/financeSync')
 
-const normalizeEntityName = (value) => String(value).trim().replace(/\s+/g, ' ').toLowerCase()
-const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const normalizeEntityName = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase()
+const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 const buildAgentUsername = async (agentName) => {
   const slug = String(agentName)
@@ -80,7 +82,6 @@ exports.deleteFinanceEntity = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Finance entity not found' })
     }
 
-    // Step 9: Do not blindly delete loans with payment history
     const hasPayments = records.some(r => r.installments && r.installments.some(inst => inst.paidAmount > 0))
     if (hasPayments) {
       await session.abortTransaction()
@@ -198,7 +199,6 @@ exports.createFinanceRecord = async (req, res, next) => {
       agentAccount = await findOrCreateAgent(entityName, session)
     }
 
-    // Generate authoritative schedule
     const schedule = generateEmiSchedule(tenure, Number(emiAmount) || 0, new Date(), 1, emiPayDate);
 
     const createdRecords = await FinanceRecord.create([{
@@ -220,7 +220,7 @@ exports.createFinanceRecord = async (req, res, next) => {
     const record = createdRecords[0]
 
     const agentCredentials = agentAccount?.credentials
-      ? { name: agentAccount.agent.name, ...agentAccount.credentials }
+      ? { name: agentAccount.agent.name, username: agentAccount.credentials.username }
       : null
 
     await session.commitTransaction()
@@ -235,19 +235,26 @@ exports.createFinanceRecord = async (req, res, next) => {
 
 exports.getFinanceSummary = async (req, res, next) => {
   try {
-    if (req.user.role === 'wholesaler') {
+    if (req.user && req.user.role === 'wholesaler') {
        return res.status(403).json({ success: false, message: 'Access denied' });
     }
+
+    // Auto-sync existing/legacy finance sales into FinanceRecords
+    await syncAllFinanceSales()
+
+    const baseFilter = { status: { $nin: ['Cancelled', 'Draft', 'cancelled', 'draft'] } }
     const filter = req.user.role === 'finance_agent'
-      ? agentFinanceFilter(req.user)
-      : {}
+      ? { ...baseFilter, ...agentFinanceFilter(req.user) }
+      : baseFilter
+
     const summary = await FinanceRecord.aggregate([
       { $match: filter },
       {
         $group: {
           _id: { entityName: '$entityName', financeType: '$financeType' },
           totalCount: { $sum: 1 },
-          totalFinancedAmount: { $sum: '$usedLimit' }
+          totalFinancedAmount: { $sum: '$usedLimit' },
+          sampleAgentId: { $first: '$agentId' }
         }
       },
       {
@@ -256,29 +263,40 @@ exports.getFinanceSummary = async (req, res, next) => {
           entityName: '$_id.entityName',
           financeType: '$_id.financeType',
           totalCount: 1,
-          totalFinancedAmount: 1
+          totalFinancedAmount: 1,
+          sampleAgentId: 1
         }
       }
     ])
 
-    const privateEntities = summary.filter(s => s.financeType === 'Private').map(s => s.entityName)
-    if (privateEntities.length > 0) {
-      const agents = await User.find({ role: 'finance_agent', financeEntityName: { $in: privateEntities } }).select('financeEntityName username')
+    const entities = summary.map(s => s.entityName)
+    if (entities.length > 0) {
+      const agents = await User.find({
+        role: 'finance_agent',
+        $or: [
+          { financeEntityName: { $in: entities } },
+          { _id: { $in: summary.map(s => s.sampleAgentId).filter(Boolean) } }
+        ]
+      }).select('_id name username financeEntityName')
+
       summary.forEach(s => {
-        if (s.financeType === 'Private') {
-          const agent = agents.find(a => String(a.financeEntityName).trim().toLowerCase() === String(s.entityName).trim().toLowerCase())
-          if (agent) {
-            s.agentUsername = agent.username
-          } else {
-            s.agentUsername = 'Not Found'
-          }
+        const agent = agents.find(a => 
+          (s.sampleAgentId && String(a._id) === String(s.sampleAgentId)) ||
+          (a.financeEntityName && String(a.financeEntityName).trim().toLowerCase() === String(s.entityName).trim().toLowerCase())
+        )
+        if (agent) {
+          s.agentId = agent._id
+          s.agentName = agent.name
+          s.agentUsername = agent.username
+        } else {
+          s.agentId = s.sampleAgentId || 'N/A'
+          s.agentName = s.entityName
+          s.agentUsername = 'N/A'
         }
       })
-
-      res.status(200).json({ success: true, data: summary })
-    } else {
-      res.status(200).json({ success: true, data: summary })
     }
+
+    res.status(200).json({ success: true, data: summary })
   } catch (error) {
     next(error)
   }
@@ -286,13 +304,15 @@ exports.getFinanceSummary = async (req, res, next) => {
 
 exports.getFinanceByEntity = async (req, res, next) => {
   try {
-    if (req.user.role === 'wholesaler') {
+    if (req.user && req.user.role === 'wholesaler') {
        return res.status(403).json({ success: false, message: 'Access denied' });
     }
     const { entityName } = req.params
+    const exactNameRegex = new RegExp(`^${escapeRegex(entityName.trim())}$`, 'i')
     const filter = req.user.role === 'finance_agent'
       ? agentFinanceFilter(req.user)
-      : { entityName }
+      : { entityName: exactNameRegex }
+
     const records = await FinanceRecord.find(filter).sort({ createdAt: -1 })
     res.status(200).json({ success: true, data: records })
   } catch (error) {
@@ -307,7 +327,7 @@ exports.getCustomerFinanceDetails = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Mobile number is required' })
     }
 
-    const record = await FinanceRecord.findOne({ mobileNumber, status: 'Active' }).sort({ createdAt: -1 })
+    const record = await FinanceRecord.findOne({ mobileNumber, status: { $ne: 'Cancelled' } }).sort({ createdAt: -1 })
     
     if (!record) {
       return res.status(404).json({ success: false, message: 'No active finance record found for this number' })
@@ -316,6 +336,7 @@ exports.getCustomerFinanceDetails = async (req, res, next) => {
     res.json({
       success: true,
       data: {
+        _id: record._id,
         customerName: record.customerName,
         productDetails: record.productDetails,
         emiAmount: record.emiAmount,
@@ -324,7 +345,11 @@ exports.getCustomerFinanceDetails = async (req, res, next) => {
         paidEmis: record.paidEmis || [],
         installments: record.installments || [],
         createdAt: record.createdAt,
-        billRef: record.billRef
+        billRef: record.billRef,
+        financeType: record.financeType,
+        entityName: record.entityName,
+        totalLimit: record.totalLimit,
+        usedLimit: record.usedLimit
       }
     })
   } catch (error) {
@@ -365,9 +390,7 @@ exports.updateEmiStatus = async (req, res, next) => {
     }
 
     if (!record.installments || record.installments.length === 0) {
-      // If legacy record, generate schedule
       const schedule = generateEmiSchedule(record.tenure, record.emiAmount, record.createdAt || new Date(), 1);
-      // Migrate legacy paidEmis
       (record.paidEmis || []).forEach(paidId => {
         const inst = schedule.find(s => s.installmentNumber === paidId);
         if (inst) {
@@ -387,16 +410,15 @@ exports.updateEmiStatus = async (req, res, next) => {
     }
 
     let paymentAmount = amount !== undefined ? Number(amount) : installment.remainingAmount;
+    let refundAmount = 0;
 
     if (status === 'Paid') {
-      // MAKE PAYMENT
       if (paymentAmount <= 0) {
         await session.abortTransaction();
         session.endSession();
         return res.status(422).json({ success: false, message: 'Payment amount must be greater than zero.' });
       }
       if (paymentAmount > installment.remainingAmount) {
-        // STEP 7: Prevent overpayment
         await session.abortTransaction();
         session.endSession();
         return res.status(422).json({ success: false, message: `Payment (₹${paymentAmount}) exceeds valid outstanding amount (₹${installment.remainingAmount}).` });
@@ -405,10 +427,8 @@ exports.updateEmiStatus = async (req, res, next) => {
       installment.paidAmount += paymentAmount;
       installment.remainingAmount -= paymentAmount;
       
-      // STEP 6: Partial Payment logic
       if (installment.remainingAmount === 0) {
         installment.status = 'Paid';
-        // Add to legacy array just in case frontend relies on it currently
         if (!record.paidEmis.includes(emiNumber)) {
           record.paidEmis.push(emiNumber);
         }
@@ -417,7 +437,6 @@ exports.updateEmiStatus = async (req, res, next) => {
       }
       installment.paymentDate = new Date();
 
-      // Create accounting transaction
       await Transaction.create([{
         transactionType: 'emi_payment',
         referenceId: record._id,
@@ -431,21 +450,19 @@ exports.updateEmiStatus = async (req, res, next) => {
       }], { session });
 
     } else if (status === 'Pending') {
-      // STEP 8: PAYMENT REVERSAL
       if (installment.paidAmount === 0) {
         await session.abortTransaction();
         session.endSession();
         return res.status(422).json({ success: false, message: 'No payment exists to reverse.' });
       }
       
-      const refundAmount = installment.paidAmount;
+      refundAmount = installment.paidAmount;
       installment.paidAmount = 0;
       installment.remainingAmount = installment.expectedAmount;
       installment.status = 'Pending';
       installment.paymentDate = null;
       record.paidEmis = record.paidEmis.filter(id => id !== emiNumber);
 
-      // Reverse accounting transaction
       await Transaction.create([{
         transactionType: 'refund',
         referenceId: record._id,
@@ -460,6 +477,32 @@ exports.updateEmiStatus = async (req, res, next) => {
     }
 
     await record.save({ session });
+
+    // Two-way sync to Sale document if present
+    if (record.saleId || record.billRef) {
+      const sale = await Sale.findOne({ $or: [{ _id: record.saleId }, { invoiceNumber: record.billRef }] }).session(session)
+      if (sale && sale.installmentSchedule) {
+        const saleInst = sale.installmentSchedule.find(s => s.installmentNumber === emiNumber)
+        if (saleInst) {
+          saleInst.paidAmount = installment.paidAmount
+          saleInst.actualPaymentDate = installment.paymentDate
+          saleInst.status = installment.status === 'Paid' ? 'paid' : (installment.status === 'Partially Paid' ? 'partial' : 'pending')
+          
+          if (status === 'Paid' && paymentAmount > 0) {
+            sale.amountPaid = (sale.amountPaid || 0) + paymentAmount
+          } else if (status === 'Pending' && refundAmount > 0) {
+            sale.amountPaid = Math.max(0, (sale.amountPaid || 0) - refundAmount)
+          }
+          sale.amountDue = Math.max(0, (sale.grandTotal || 0) - sale.amountPaid)
+          if (sale.amountDue <= 0) sale.billStatus = 'paid'
+          else if (sale.amountPaid > 0) sale.billStatus = 'partially_paid'
+          else sale.billStatus = 'due'
+
+          await sale.save({ session })
+        }
+      }
+    }
+
     await session.commitTransaction();
     session.endSession();
     
@@ -470,4 +513,3 @@ exports.updateEmiStatus = async (req, res, next) => {
     next(error)
   }
 }
-

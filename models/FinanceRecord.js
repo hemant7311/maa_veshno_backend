@@ -9,13 +9,14 @@ const emiInstallmentSchema = new mongoose.Schema({
   status: { type: String, enum: ['Pending', 'Paid', 'Partially Paid', 'Overdue', 'Cancelled'], default: 'Pending' },
   paymentDate: { type: Date },
   paymentMethod: { type: String },
-  reference: { type: String } // e.g. transaction reference
+  reference: { type: String }
 }, { _id: true });
 
 const financeRecordSchema = new mongoose.Schema(
   {
+    saleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale', default: null, index: true },
     financeType: { type: String, enum: ['Company', 'Private'], required: true },
-    entityName: { type: String, required: true }, // Name of the company or the private agent
+    entityName: { type: String, required: true, index: true }, // Name of the company or private financier
     agentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
     customerName: { type: String, required: true },
     mobileNumber: { type: String, required: true },
@@ -23,13 +24,13 @@ const financeRecordSchema = new mongoose.Schema(
     usedLimit: { type: Number, default: 0 },
     availableLimit: { type: Number, default: 0 },
     status: { type: String, default: 'Active' },
-    billRef: { type: String }, // Invoice number reference
+    billRef: { type: String, index: true }, // Invoice number reference
     productDetails: { type: String }, // E.g., Mobile name + IMEI
     emiAmount: { type: Number, default: 0 },
     tenure: { type: String }, // E.g., '6 Months' or '6'
     paymentDate: { type: Date },
-    installments: [emiInstallmentSchema], // Authoritative schedule
-    paidEmis: [{ type: Number }] // Legacy support
+    installments: [emiInstallmentSchema],
+    paidEmis: [{ type: Number }]
   },
   { timestamps: true }
 )
