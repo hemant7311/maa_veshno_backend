@@ -1194,4 +1194,154 @@ const payInstallment = async (req, res) => {
   }
 }
 
-module.exports = { getByInvoice, list, getOne, create, getPendingEmiNotifications, getBalanceSheet, update, cancel, receivePayment, saveBillImage, payInstallment }
+const convertDraft = async (req, res) => {
+  const session = await mongoose.startSession()
+  session.startTransaction()
+  try {
+    const saleId = req.params.id
+    let sale = null
+    if (mongoose.Types.ObjectId.isValid(saleId)) {
+      sale = await Sale.findById(saleId).session(session)
+    }
+    if (!sale) {
+      sale = await Sale.findOne({ invoiceNumber: saleId }).session(session)
+    }
+    if (!sale) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Sale not found', errors: {} })
+    }
+
+    if (sale.billStatus !== 'draft') {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(422).json({ success: false, message: 'Bill is already converted or final.', errors: {} })
+    }
+
+    const grandTotal = Math.round((sale.grandTotal || 0) * 100) / 100
+    const amountPaid = Math.round((sale.amountPaid || 0) * 100) / 100
+    const amountDue = Math.max(0, Math.round((grandTotal - amountPaid) * 100) / 100)
+
+    let billStatus = 'saved'
+    if (amountDue <= 0) billStatus = 'paid'
+    else if (amountPaid > 0) billStatus = 'partially_paid'
+    else billStatus = 'due'
+
+    // Convert reserved IMEIs to sold
+    const imeiList = sale.items.map(item => item.imei).filter(im => im && im !== 'N/A' && im !== '—' && String(im).trim() !== '')
+    if (imeiList.length > 0) {
+      await Imei.updateMany(
+        { imeiNumber: { $in: imeiList }, status: 'reserved' },
+        { $set: { status: 'sold', soldAt: new Date() } },
+        { session }
+      )
+    }
+
+    // Update customer totalPurchases & balance
+    if (sale.customerId) {
+      const cust = await Customer.findById(sale.customerId).session(session)
+      if (cust) {
+        cust.totalPurchases = (cust.totalPurchases || 0) + grandTotal
+        cust.balance = (cust.balance || 0) + amountDue
+        await cust.save({ session })
+      }
+    }
+
+    // Create financial transactions
+    const txns = [{
+      transactionType: 'sale',
+      referenceId: sale._id,
+      referenceNumber: sale.invoiceNumber,
+      description: `${sale.saleType ? sale.saleType.toUpperCase() : 'RETAIL'} Sale to ${sale.customerName} (Invoice #${sale.invoiceNumber})`,
+      amount: grandTotal,
+      paymentMethod: sale.paymentMode || 'cash',
+      relatedEntity: sale.customerName,
+      transactionDate: new Date(),
+      createdBy: req.user?._id,
+    }]
+
+    if (amountPaid > 0) {
+      txns.push({
+        transactionType: 'customer_payment',
+        referenceId: sale._id,
+        referenceNumber: sale.invoiceNumber,
+        description: `Payment received for Invoice #${sale.invoiceNumber}`,
+        amount: amountPaid,
+        paymentMethod: sale.paymentMode === 'finance' ? 'cash' : (sale.paymentMode || 'cash'),
+        relatedEntity: sale.customerName,
+        transactionDate: new Date(),
+        createdBy: req.user?._id,
+      })
+    }
+
+    await Transaction.create(txns, { session, ordered: true })
+
+    sale.billStatus = billStatus
+    sale.amountDue = amountDue
+    await sale.save({ session })
+
+    await session.commitTransaction()
+    session.endSession()
+    res.json({ success: true, message: `Draft ${sale.invoiceNumber} converted to final bill successfully.`, data: sale })
+  } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
+    res.status(500).json({ success: false, message: error.message || 'Failed to convert draft', errors: { error: error.message } })
+  }
+}
+
+const deleteDraft = async (req, res) => {
+  const session = await mongoose.startSession()
+  session.startTransaction()
+  try {
+    const saleId = req.params.id
+    let sale = null
+    if (mongoose.Types.ObjectId.isValid(saleId)) {
+      sale = await Sale.findById(saleId).session(session)
+    }
+    if (!sale) {
+      sale = await Sale.findOne({ invoiceNumber: saleId }).session(session)
+    }
+    if (!sale) {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(404).json({ success: false, message: 'Sale not found', errors: {} })
+    }
+
+    if (sale.billStatus !== 'draft') {
+      await session.abortTransaction()
+      session.endSession()
+      return res.status(422).json({ success: false, message: 'Only draft bills can be permanently deleted. Use Cancel for final bills.', errors: {} })
+    }
+
+    // 1. Release reserved IMEIs back to available
+    const imeiList = sale.items.map(item => item.imei).filter(im => im && im !== 'N/A' && im !== '—' && String(im).trim() !== '')
+    if (imeiList.length > 0) {
+      await Imei.updateMany(
+        { imeiNumber: { $in: imeiList }, status: 'reserved' },
+        { $set: { status: 'available', soldAt: null } },
+        { session }
+      )
+    }
+
+    // 2. Restore reserved stock
+    for (const item of sale.items) {
+      if (item.productId) {
+        await Product.findByIdAndUpdate(item.productId, { $inc: { stock: Math.abs(item.qty || 1) } }, { session })
+      }
+    }
+
+    // 3. Delete sale document permanently
+    await Sale.findByIdAndDelete(sale._id).session(session)
+
+    await session.commitTransaction()
+    session.endSession()
+    res.json({ success: true, message: `Draft ${sale.invoiceNumber} deleted successfully.`, data: { id: sale._id, invoiceNumber: sale.invoiceNumber } })
+  } catch (error) {
+    await session.abortTransaction()
+    session.endSession()
+    res.status(500).json({ success: false, message: error.message || 'Failed to delete draft', errors: { error: error.message } })
+  }
+}
+
+module.exports = { getByInvoice, list, getOne, create, getPendingEmiNotifications, getBalanceSheet, update, cancel, receivePayment, saveBillImage, payInstallment, convertDraft, deleteDraft }

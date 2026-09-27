@@ -13,10 +13,10 @@ router.post('/', asyncHandler(controller.create)) // moved above requireAuth for
 router.use(requireAuth)
 router.put('/:id', asyncHandler(controller.update))
 router.post('/:id/bill-image', asyncHandler(controller.saveBillImage))
+router.patch('/:id/convert', asyncHandler(controller.convertDraft))
 router.patch('/:id/cancel', asyncHandler(controller.cancel))
-router.delete('/:id', asyncHandler(controller.cancel))
+router.delete('/:id', asyncHandler(controller.deleteDraft))
 router.post('/:id/installment', asyncHandler(controller.payInstallment))
 router.patch('/:id', asyncHandler(controller.receivePayment))
 
 module.exports = router
-
