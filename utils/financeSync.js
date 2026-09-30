@@ -110,7 +110,8 @@ async function syncFinanceRecordFromSale(sale, session = null) {
   const entityName = String(company).trim()
 
   let agentId = null
-  if (entityName) {
+  const isSelfFinance = normalizeEntityName(entityName) === 'self finance'
+  if (financeType === 'Private' && entityName && !isSelfFinance) {
     const agent = await findOrCreateFinanceAgent(entityName, session)
     if (agent) agentId = agent._id
   }
