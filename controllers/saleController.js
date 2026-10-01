@@ -1380,46 +1380,68 @@ const deleteDraft = async (req, res) => {
     }
     if (!sale) {
       await session.abortTransaction()
-      session.endSession()
+      if(session) session.endSession()
       return res.status(404).json({ success: false, message: 'Sale not found', errors: {} })
     }
 
-    if (sale.billStatus !== 'draft') {
+    // Validation: Only allow deleting Drafts or Test Bills (0 payment)
+    if (sale.billStatus !== 'draft' && sale.amountPaid > 0) {
       await session.abortTransaction()
-      session.endSession()
-      return res.status(422).json({ success: false, message: 'Only draft bills can be permanently deleted. Use Cancel for final bills.', errors: {} })
+      if(session) session.endSession()
+      return res.status(422).json({ 
+        success: false, 
+        message: 'Cannot permanently delete a finalized bill with payment history. Please use the Cancel Bill action instead to preserve financial audit logs.', 
+        errors: {} 
+      })
     }
 
-    // 1. Release reserved IMEIs back to available
-    const imeiList = sale.items.map(item => item.imei).filter(im => im && im !== 'N/A' && im !== '—' && String(im).trim() !== '')
+    // Validation: If it's a finance bill, ensure no EMI has been paid
+    const financeRecord = await mongoose.model('FinanceRecord').findOne({ $or: [{ saleId: sale._id }, { billRef: sale.invoiceNumber }] }).session(session);
+    if (financeRecord && financeRecord.installmentSchedule && financeRecord.installmentSchedule.some(emi => emi.status === 'Paid' || emi.status === 'Partially Paid')) {
+      await session.abortTransaction()
+      if(session) session.endSession()
+      return res.status(422).json({ 
+        success: false, 
+        message: 'Cannot permanently delete this bill because an EMI payment has already been collected. Please use the Cancel Bill action instead.', 
+        errors: {} 
+      })
+    }
+
+    // 1. Release reserved/sold IMEIs back to available
+    const imeiList = sale.items.map(item => item.imei).filter(im => im && im !== 'N/A' && im !== '?' && String(im).trim() !== '')
     if (imeiList.length > 0) {
-      await Imei.updateMany(
-        { imeiNumber: { $in: imeiList }, status: 'reserved' },
+      await mongoose.model('Imei').updateMany(
+        { imeiNumber: { $in: imeiList }, status: { $in: ['reserved', 'sold'] } },
         { $set: { status: 'available', soldAt: null } },
         { session }
       )
     }
 
-    // 2. Restore reserved stock
+    // 2. Restore stock (works for both reserved draft stock and deducted sold stock)
     for (const item of sale.items) {
       if (item.productId) {
-        await Product.findByIdAndUpdate(item.productId, { $inc: { stock: Math.abs(item.qty || 1) } }, { session })
+        await mongoose.model('Product').findByIdAndUpdate(item.productId, { $inc: { stock: Math.abs(item.qty || 1) } }, { session })
       }
     }
 
     // 3. Delete FinanceRecord if present
-    await FinanceRecord.deleteMany({ $or: [{ saleId: sale._id }, { billRef: sale.invoiceNumber }] }, { session })
+    await mongoose.model('FinanceRecord').deleteMany({ $or: [{ saleId: sale._id }, { billRef: sale.invoiceNumber }] }, { session })
 
-    // 4. Delete sale document permanently
+    // 4. Delete associated Transactions (like the initial 'sale' ledger entry)
+    await mongoose.model('Transaction').deleteMany({ $or: [{ referenceId: sale._id }, { referenceNumber: sale.invoiceNumber }] }, { session })
+
+    // 5. Delete sale document permanently
     await Sale.findByIdAndDelete(sale._id).session(session)
 
     await session.commitTransaction()
-    session.endSession()
-    res.json({ success: true, message: `Draft ${sale.invoiceNumber} deleted successfully.`, data: { id: sale._id, invoiceNumber: sale.invoiceNumber } })
+    if(session) session.endSession()
+
+    return res.status(200).json({ success: true, message: 'Bill deleted successfully', errors: {} })
   } catch (error) {
-    await session.abortTransaction()
-    session.endSession()
-    res.status(500).json({ success: false, message: error.message || 'Failed to delete draft', errors: { error: error.message } })
+    if(session) await session.abortTransaction()
+    if(session) session.endSession()
+    console.error('Delete Bill Error:', error)
+    return res.status(500).json({ success: false, message: 'Failed to delete bill', errors: { details: error.message } })
   }
 }
 
