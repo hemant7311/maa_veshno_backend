@@ -1384,43 +1384,24 @@ const deleteDraft = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Sale not found', errors: {} })
     }
 
-    // Validation: Only allow deleting Drafts or Test Bills (0 payment)
-    if (sale.billStatus !== 'draft' && sale.amountPaid > 0) {
-      await session.abortTransaction()
-      if(session) session.endSession()
-      return res.status(422).json({ 
-        success: false, 
-        message: 'Cannot permanently delete a finalized bill with payment history. Please use the Cancel Bill action instead to preserve financial audit logs.', 
-        errors: {} 
-      })
-    }
+    // Force delete logic: We allow deleting ANY bill, but must protect against double-restoring stock
+    const isAlreadyCancelled = (sale.status === 'cancelled' || sale.billStatus === 'cancelled');
 
-    // Validation: If it's a finance bill, ensure no EMI has been paid
-    const financeRecord = await mongoose.model('FinanceRecord').findOne({ $or: [{ saleId: sale._id }, { billRef: sale.invoiceNumber }] }).session(session);
-    if (financeRecord && financeRecord.installmentSchedule && financeRecord.installmentSchedule.some(emi => emi.status === 'Paid' || emi.status === 'Partially Paid')) {
-      await session.abortTransaction()
-      if(session) session.endSession()
-      return res.status(422).json({ 
-        success: false, 
-        message: 'Cannot permanently delete this bill because an EMI payment has already been collected. Please use the Cancel Bill action instead.', 
-        errors: {} 
-      })
-    }
+    // 1 & 2. Restore Stock and IMEIs ONLY IF the bill wasn't already cancelled
+    if (!isAlreadyCancelled) {
+      const imeiList = sale.items.map(item => item.imei).filter(im => im && im !== 'N/A' && im !== '?' && String(im).trim() !== '')
+      if (imeiList.length > 0) {
+        await mongoose.model('Imei').updateMany(
+          { imeiNumber: { $in: imeiList }, status: { $in: ['reserved', 'sold'] } },
+          { $set: { status: 'available', soldAt: null } },
+          { session }
+        )
+      }
 
-    // 1. Release reserved/sold IMEIs back to available
-    const imeiList = sale.items.map(item => item.imei).filter(im => im && im !== 'N/A' && im !== '?' && String(im).trim() !== '')
-    if (imeiList.length > 0) {
-      await mongoose.model('Imei').updateMany(
-        { imeiNumber: { $in: imeiList }, status: { $in: ['reserved', 'sold'] } },
-        { $set: { status: 'available', soldAt: null } },
-        { session }
-      )
-    }
-
-    // 2. Restore stock (works for both reserved draft stock and deducted sold stock)
-    for (const item of sale.items) {
-      if (item.productId) {
-        await mongoose.model('Product').findByIdAndUpdate(item.productId, { $inc: { stock: Math.abs(item.qty || 1) } }, { session })
+      for (const item of sale.items) {
+        if (item.productId) {
+          await mongoose.model('Product').findByIdAndUpdate(item.productId, { $inc: { stock: Math.abs(item.qty || 1) } }, { session })
+        }
       }
     }
 
