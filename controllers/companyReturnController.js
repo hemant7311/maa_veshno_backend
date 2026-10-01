@@ -172,7 +172,7 @@ const { isValidIMEI } = require('../utils/imeiValidator')
         supplierDoc.paidAmount = Math.max(0, (supplierDoc.paidAmount || 0) - excess)
       }
       supplierDoc.pendingAmount = Math.max(0, supplierDoc.totalAmount - (supplierDoc.paidAmount || 0))
-      await supplierDoc.save({ session })
+      await supplierDoc.save({ session, validateModifiedOnly: true })
     }
 
     // 7. Create CompanyReturn record
@@ -259,7 +259,7 @@ const deleteReturn = async (req, res) => {
           supplierDoc.totalAmount = (supplierDoc.totalAmount || 0) + returnAmount
           supplierDoc.pendingAmount = (supplierDoc.pendingAmount || 0) + returnAmount
           supplierDoc.pendingAmount = Math.max(0, supplierDoc.totalAmount - (supplierDoc.paidAmount || 0))
-          await supplierDoc.save({ session })
+          await supplierDoc.save({ session, validateModifiedOnly: true })
         }
       }
     }

@@ -118,7 +118,7 @@ const updateReceivable = async (req, res) => {
     if (date !== undefined) receivable.date = date
     if (notes !== undefined) receivable.notes = notes
     
-    await receivable.save({ session })
+    await receivable.save({ session, validateModifiedOnly: true })
 
     if (amountChanged || customerName !== undefined || date !== undefined) {
        const updateData = {};
@@ -186,7 +186,7 @@ const cancelReceivable = async (req, res) => {
     }
     receivable.status = 'cancelled'
     receivable.cancelledAt = new Date()
-    await receivable.save({ session })
+    await receivable.save({ session, validateModifiedOnly: true })
 
     const outstanding = receivable.givenAmount - receivable.receivedAmount
     if (outstanding > 0) {
@@ -245,7 +245,7 @@ const giveMoney = async (req, res) => {
     const payment = createdPayments[0]
 
     receivable.givenAmount += amount
-    await receivable.save({ session })
+    await receivable.save({ session, validateModifiedOnly: true })
 
     await Transaction.create([{
       transactionType: 'customer_receivable_payment',
@@ -308,7 +308,7 @@ const receiveMoney = async (req, res) => {
     const payment = createdPayments[0]
 
     receivable.receivedAmount += amount
-    await receivable.save({ session })
+    await receivable.save({ session, validateModifiedOnly: true })
 
     await Transaction.create([{
       transactionType: 'customer_receivable_payment',

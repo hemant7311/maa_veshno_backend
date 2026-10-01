@@ -219,7 +219,7 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
       if (saleType === 'wholesale') customer.customerType = 'wholesale'
       if (req.body.address) customer.address = req.body.address
       if (req.body.partyGst) customer.gstNumber = req.body.partyGst
-      await customer.save({ session })
+      await customer.save({ session, validateModifiedOnly: true })
     }
 
     // 2. Authoritative Lookup of Purchase Prices for items from Product Master
@@ -719,7 +719,7 @@ const update = async (req, res) => {
     oldSale.amountDue = finalAmountDue
     oldSale.billStatus = billStatus
     if (promisedDate !== undefined) oldSale.promisedDate = promisedDate ? new Date(promisedDate) : null
-    await oldSale.save({ session })
+    await oldSale.save({ session, validateModifiedOnly: true })
 
     await syncFinanceRecordFromSale(oldSale, session)
 
@@ -787,7 +787,7 @@ const cancel = async (req, res) => {
     // 4. Mark sale as cancelled
     sale.status = 'cancelled'
     sale.billStatus = 'cancelled'
-    await sale.save({ session })
+    await sale.save({ session, validateModifiedOnly: true })
 
     // 5. Create transaction record for cancellation (if money was actually paid)
     const cancelTxns = []
@@ -898,12 +898,12 @@ const receivePayment = async (req, res) => {
         const customer = await Customer.findById(sale.customerId).session(session)
         if (customer) {
           customer.balance = (customer.balance || 0) - paymentDelta
-          await customer.save({ session })
+          await customer.save({ session, validateModifiedOnly: true })
         }
       }
     }
 
-    await sale.save({ session })
+    await sale.save({ session, validateModifiedOnly: true })
     await session.commitTransaction()
     session.endSession()
     res.json({ success: true, message: 'Payment received successfully', data: sale })
@@ -1236,13 +1236,13 @@ const payInstallment = async (req, res) => {
       sale.billStatus = 'due'
     }
 
-    await sale.save({ session })
+    await sale.save({ session, validateModifiedOnly: true })
 
     if (sale.customerId) {
       const customer = await Customer.findById(sale.customerId).session(session)
       if (customer) {
         customer.balance = Math.max(0, (customer.balance || 0) - payAmount)
-        await customer.save({ session })
+        await customer.save({ session, validateModifiedOnly: true })
       }
     }
 
@@ -1317,7 +1317,7 @@ const convertDraft = async (req, res) => {
       if (cust) {
         cust.totalPurchases = (cust.totalPurchases || 0) + grandTotal
         cust.balance = (cust.balance || 0) + amountDue
-        await cust.save({ session })
+        await cust.save({ session, validateModifiedOnly: true })
       }
     }
 
@@ -1352,7 +1352,7 @@ const convertDraft = async (req, res) => {
 
     sale.billStatus = billStatus
     sale.amountDue = amountDue
-    await sale.save({ session })
+    await sale.save({ session, validateModifiedOnly: true })
 
     await syncFinanceRecordFromSale(sale, session)
 

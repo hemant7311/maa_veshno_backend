@@ -5,7 +5,7 @@ const Transaction = require('../models/Transaction')
 const bcrypt = require('bcryptjs')
 const crypto = require('crypto')
 const mongoose = require('mongoose')
-const { generateEmiSchedule } = require('../utils/financeUtils')
+const { generateEmiSchedule, calculateFinanceStats } = require('../utils/financeUtils')
 const { syncAllFinanceSales } = require('../utils/financeSync')
 
 const normalizeEntityName = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase()
@@ -37,7 +37,7 @@ const findOrCreateAgent = async (entityName, session) => {
     if (!agent.financeEntityKey) {
       agent.financeEntityName = String(entityName).trim()
       agent.financeEntityKey = normalizedName
-      await agent.save({ session })
+      await agent.save({ session, validateModifiedOnly: true })
     }
     return { agent, credentials: null, created: false }
   }
@@ -251,6 +251,8 @@ exports.getFinanceSummary = async (req, res, next) => {
           _id: { entityName: '$entityName', financeType: '$financeType' },
           totalCount: { $sum: 1 },
           totalFinancedAmount: { $sum: '$usedLimit' },
+            totalPaid: { $sum: { $sum: '$installments.paidAmount' } },
+            totalPending: { $sum: { $sum: '$installments.remainingAmount' } },
           sampleAgentId: { $first: '$agentId' }
         }
       },
@@ -261,6 +263,8 @@ exports.getFinanceSummary = async (req, res, next) => {
           financeType: '$_id.financeType',
           totalCount: 1,
           totalFinancedAmount: 1,
+            totalPaid: 1,
+            totalPending: 1,
           sampleAgentId: 1
         }
       }
@@ -347,7 +351,8 @@ exports.getAgentRecords = async (req, res, next) => {
     }
     const filter = agentFinanceFilter(req.user)
     const records = await FinanceRecord.find(filter).sort({ createdAt: -1 })
-    res.json({ success: true, data: records })
+    const enrichedRecords = records.map(calculateFinanceStats)
+    res.json({ success: true, data: enrichedRecords })
   } catch (error) {
     next(error)
   }
@@ -365,7 +370,8 @@ exports.getFinanceByEntity = async (req, res, next) => {
       : { entityName: exactNameRegex }
 
     const records = await FinanceRecord.find(filter).sort({ createdAt: -1 })
-    res.status(200).json({ success: true, data: records })
+    const enrichedRecords = records.map(calculateFinanceStats)
+    res.status(200).json({ success: true, data: enrichedRecords })
   } catch (error) {
     next(error)
   }
@@ -386,22 +392,7 @@ exports.getCustomerFinanceDetails = async (req, res, next) => {
 
     res.json({
       success: true,
-      data: {
-        _id: record._id,
-        customerName: record.customerName,
-        productDetails: record.productDetails,
-        emiAmount: record.emiAmount,
-        tenure: record.tenure,
-        paymentDate: record.paymentDate,
-        paidEmis: record.paidEmis || [],
-        installments: record.installments || [],
-        createdAt: record.createdAt,
-        billRef: record.billRef,
-        financeType: record.financeType,
-        entityName: record.entityName,
-        totalLimit: record.totalLimit,
-        usedLimit: record.usedLimit
-      }
+      data: calculateFinanceStats(record)
     })
   } catch (error) {
     next(error)
@@ -414,7 +405,8 @@ exports.getMyFinanceRecords = async (req, res, next) => {
       return res.status(403).json({ success: false, message: 'This endpoint is for finance agents only', errors: {} })
     }
     const records = await FinanceRecord.find(agentFinanceFilter(req.user)).sort({ createdAt: -1 })
-    res.json({ success: true, data: records })
+    const enrichedRecords = records.map(calculateFinanceStats)
+    res.json({ success: true, data: enrichedRecords })
   } catch (error) {
     next(error)
   }
@@ -422,11 +414,11 @@ exports.getMyFinanceRecords = async (req, res, next) => {
 
 exports.updateEmiStatus = async (req, res, next) => {
   const session = await mongoose.startSession();
-  session.startTransaction();
+  if(session) session.startTransaction();
   try {
     if (req.user && req.user.role === 'wholesaler') {
-      await session.abortTransaction();
-      session.endSession();
+      if(session) await session.abortTransaction();
+      if(session) session.endSession();
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
     const { recordId, emiId } = req.params
@@ -435,8 +427,8 @@ exports.updateEmiStatus = async (req, res, next) => {
     const emiNumber = parseInt(emiId, 10)
     const record = await FinanceRecord.findById(recordId).session(session)
     if (!record) {
-      await session.abortTransaction();
-      session.endSession();
+      if(session) await session.abortTransaction();
+      if(session) session.endSession();
       return res.status(404).json({ success: false, message: 'Finance record not found' })
     }
 
@@ -444,8 +436,8 @@ exports.updateEmiStatus = async (req, res, next) => {
       const isOwner = (record.agentId && String(record.agentId) === String(req.user._id)) ||
         (record.entityName && req.user.financeEntityName && String(record.entityName).trim().toLowerCase() === String(req.user.financeEntityName).trim().toLowerCase())
       if (!isOwner) {
-        await session.abortTransaction();
-        session.endSession();
+        if(session) await session.abortTransaction();
+        if(session) session.endSession();
         return res.status(403).json({ success: false, message: 'Access denied: You are not authorized to update this finance record' });
       }
     }
@@ -465,8 +457,8 @@ exports.updateEmiStatus = async (req, res, next) => {
 
     const installment = record.installments.find(i => i.installmentNumber === emiNumber);
     if (!installment) {
-      await session.abortTransaction();
-      session.endSession();
+      if(session) await session.abortTransaction();
+      if(session) session.endSession();
       return res.status(404).json({ success: false, message: 'Installment not found' });
     }
 
@@ -475,13 +467,13 @@ exports.updateEmiStatus = async (req, res, next) => {
 
     if (status === 'Paid') {
       if (paymentAmount <= 0) {
-        await session.abortTransaction();
-        session.endSession();
+        if(session) await session.abortTransaction();
+        if(session) session.endSession();
         return res.status(422).json({ success: false, message: 'Payment amount must be greater than zero.' });
       }
       if (paymentAmount > installment.remainingAmount) {
-        await session.abortTransaction();
-        session.endSession();
+        if(session) await session.abortTransaction();
+        if(session) session.endSession();
         return res.status(422).json({ success: false, message: `Payment (₹${paymentAmount}) exceeds valid outstanding amount (₹${installment.remainingAmount}).` });
       }
 
@@ -498,8 +490,9 @@ exports.updateEmiStatus = async (req, res, next) => {
       }
       installment.paymentDate = new Date();
 
-      await Transaction.create([{
-        transactionType: 'emi_payment',
+      try {
+        await Transaction.create([{
+          transactionType: 'emi',
         referenceId: record._id,
         referenceNumber: record.billRef || `EMI-${record._id}`,
         description: `EMI Payment ${emiNumber} for ${record.customerName}`,
@@ -509,11 +502,22 @@ exports.updateEmiStatus = async (req, res, next) => {
         transactionDate: new Date(),
         createdBy: req.user?._id,
       }], { session });
+      } catch (err) {
+        if (err.name === 'ValidationError') {
+          console.error('[DIAGNOSTIC] Operation: Transaction.create (EMI Payment)');
+          console.error('[DIAGNOSTIC] Model: Transaction');
+          console.error('[DIAGNOSTIC] Record ID:', record._id, 'Installment:', emiNumber);
+          for (let field in err.errors) {
+            console.error('[DIAGNOSTIC] Invalid field:', field, '| Message:', err.errors[field].message, '| Type:', err.errors[field].kind);
+          }
+        }
+        throw err;
+      }
 
     } else if (status === 'Pending') {
       if (installment.paidAmount === 0) {
-        await session.abortTransaction();
-        session.endSession();
+        if(session) await session.abortTransaction();
+        if(session) session.endSession();
         return res.status(422).json({ success: false, message: 'No payment exists to reverse.' });
       }
       
@@ -524,8 +528,9 @@ exports.updateEmiStatus = async (req, res, next) => {
       installment.paymentDate = null;
       record.paidEmis = record.paidEmis.filter(id => id !== emiNumber);
 
-      await Transaction.create([{
-        transactionType: 'refund',
+      try {
+        await Transaction.create([{
+          transactionType: 'refund',
         referenceId: record._id,
         referenceNumber: record.billRef || `EMI-${record._id}`,
         description: `EMI Payment ${emiNumber} REVERSAL for ${record.customerName}`,
@@ -535,9 +540,32 @@ exports.updateEmiStatus = async (req, res, next) => {
         transactionDate: new Date(),
         createdBy: req.user?._id,
       }], { session });
+      } catch (err) {
+        if (err.name === 'ValidationError') {
+          console.error('[DIAGNOSTIC] Operation: Transaction.create (Refund)');
+          console.error('[DIAGNOSTIC] Model: Transaction');
+          console.error('[DIAGNOSTIC] Record ID:', record._id, 'Installment:', emiNumber);
+          for (let field in err.errors) {
+            console.error('[DIAGNOSTIC] Invalid field:', field, '| Message:', err.errors[field].message, '| Type:', err.errors[field].kind);
+          }
+        }
+        throw err;
+      }
     }
 
-    await record.save({ session });
+    try {
+      await record.save({ session, validateModifiedOnly: true });
+    } catch (err) {
+      if (err.name === 'ValidationError') {
+        console.error('[DIAGNOSTIC] Operation: record.save()');
+        console.error('[DIAGNOSTIC] Model: FinanceRecord');
+        console.error('[DIAGNOSTIC] Record ID:', record._id, 'Installment:', emiNumber);
+        for (let field in err.errors) {
+          console.error('[DIAGNOSTIC] Invalid field:', field, '| Message:', err.errors[field].message, '| Type:', err.errors[field].kind);
+        }
+      }
+      throw err;
+    }
 
     // Two-way sync to Sale document if present
     if (record.saleId || record.billRef) {
@@ -559,18 +587,30 @@ exports.updateEmiStatus = async (req, res, next) => {
           else if (sale.amountPaid > 0) sale.billStatus = 'partially_paid'
           else sale.billStatus = 'due'
 
-          await sale.save({ session })
+          try {
+            await sale.save({ session, validateModifiedOnly: true });
+          } catch (err) {
+            if (err.name === 'ValidationError') {
+              console.error('[DIAGNOSTIC] Operation: sale.save()');
+              console.error('[DIAGNOSTIC] Model: Sale');
+              console.error('[DIAGNOSTIC] Sale ID:', sale._id, 'Record ID:', record._id, 'Installment:', emiNumber);
+              for (let field in err.errors) {
+                console.error('[DIAGNOSTIC] Invalid field:', field, '| Message:', err.errors[field].message, '| Type:', err.errors[field].kind);
+              }
+            }
+            throw err;
+          }
         }
       }
     }
 
-    await session.commitTransaction();
-    session.endSession();
+    if(session) await session.commitTransaction();
+    if(session) session.endSession();
     
-    res.json({ success: true, data: record });
+    res.json({ success: true, data: calculateFinanceStats(record) });
   } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
+    if(session) await session.abortTransaction();
+    if(session) session.endSession();
     next(error)
   }
 }

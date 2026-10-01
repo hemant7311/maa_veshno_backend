@@ -35,4 +35,65 @@ function generateEmiSchedule(tenureStr, emiAmount, startDate, delayMonths = 1, f
   return schedule;
 }
 
-module.exports = { generateEmiSchedule };
+function calculateFinanceStats(record) {
+  if (!record) return null;
+  const doc = typeof record.toObject === 'function' ? record.toObject() : record;
+  const installments = doc.installments || [];
+  
+  let totalScheduledEmiAmount = 0;
+  let totalEmiAmountPaid = 0;
+  let totalPendingEmiAmount = 0;
+  
+  let paidInstallmentCount = 0;
+  let overdueInstallmentCount = 0;
+  let overdueAmount = 0;
+  let nextEmiDueDate = null;
+
+  const now = new Date();
+
+  installments.forEach(inst => {
+    const expected = Number(inst.expectedAmount) || 0;
+    const paid = Number(inst.paidAmount) || 0;
+    const remaining = Math.max(0, expected - paid);
+    
+    totalScheduledEmiAmount += expected;
+    totalEmiAmountPaid += paid;
+    totalPendingEmiAmount += remaining;
+
+    if (remaining === 0) {
+      paidInstallmentCount++;
+    } else {
+      if (inst.dueDate && new Date(inst.dueDate) < now) {
+        overdueInstallmentCount++;
+        overdueAmount += remaining;
+      }
+      
+      if (!nextEmiDueDate && inst.dueDate && new Date(inst.dueDate) >= now) {
+        nextEmiDueDate = inst.dueDate;
+      }
+    }
+  });
+
+  const totalInstallments = installments.length;
+  const pendingInstallmentCount = totalInstallments - paidInstallmentCount;
+  
+  const dpAmount = Math.max(0, (Number(doc.totalLimit) || 0) - (Number(doc.usedLimit) || 0));
+
+  doc.stats = {
+    totalScheduledEmiAmount,
+    totalEmiAmountPaid,
+    totalPendingEmiAmount,
+    totalInstallments,
+    paidInstallmentCount,
+    pendingInstallmentCount,
+    overdueInstallmentCount,
+    overdueAmount,
+    nextEmiDueDate,
+    dpAmount,
+    outstandingPrincipal: doc.usedLimit || 0
+  };
+
+  return doc;
+}
+
+module.exports = { generateEmiSchedule, calculateFinanceStats };

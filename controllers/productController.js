@@ -257,7 +257,7 @@ const create = async (req, res) => {
         supplier.totalAmount = (supplier.totalAmount || 0) + cost
         supplier.paidAmount = (supplier.paidAmount || 0) + paid
         supplier.pendingAmount = Math.max(0, supplier.totalAmount - supplier.paidAmount)
-        await supplier.save({ session })
+        await supplier.save({ session, validateModifiedOnly: true })
       }
     }
     
@@ -296,7 +296,7 @@ const update = async (req, res) => {
           const totalDiff = priceDiff * imeiCount
           supplier.totalAmount = Math.max(0, supplier.totalAmount + totalDiff)
           supplier.pendingAmount = Math.max(0, supplier.totalAmount - supplier.paidAmount)
-          await supplier.save({ session })
+          await supplier.save({ session, validateModifiedOnly: true })
         }
       }
     }
@@ -336,7 +336,7 @@ const remove = async (req, res) => {
           supplier.paidAmount = Math.max(0, supplier.paidAmount - excess)
         }
         supplier.pendingAmount = Math.max(0, supplier.totalAmount - supplier.paidAmount)
-        await supplier.save({ session })
+        await supplier.save({ session, validateModifiedOnly: true })
       }
     }
 

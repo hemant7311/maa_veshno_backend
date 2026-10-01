@@ -132,7 +132,7 @@ const cancelLoan = async (req, res) => {
     loan.status = 'cancelled'
     loan.cancelledAt = new Date()
     loan.cancelReason = cancelReason || ''
-    await loan.save({ session })
+    await loan.save({ session, validateModifiedOnly: true })
 
     // Create reversing transaction for the principal
     const cancelTxns = [{
@@ -212,7 +212,7 @@ const addPayment = async (req, res) => {
     const payment = createdPayments[0]
 
     loan.paidAmount += amount
-    await loan.save({ session })
+    await loan.save({ session, validateModifiedOnly: true })
 
     // Create transaction
     await Transaction.create([{
@@ -260,7 +260,7 @@ const removePayment = async (req, res) => {
       return res.status(422).json({ success: false, message: 'Cannot remove payment from a cancelled loan', errors: {} })
     }
     loan.paidAmount = Math.max(0, loan.paidAmount - payment.amount)
-    await loan.save({ session })
+    await loan.save({ session, validateModifiedOnly: true })
     
     // Delete the transaction associated with this payment
     await Transaction.findOneAndDelete({ referenceNumber: paymentId.toString(), transactionType: 'loan_payment' }, { session })

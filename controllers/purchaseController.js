@@ -166,7 +166,7 @@ const { isValidIndianMobile, normalizeMobile } = require('../utils/mobileValidat
       supplierDoc.totalAmount = (supplierDoc.totalAmount || 0) + totalAmount
       supplierDoc.pendingAmount = (supplierDoc.pendingAmount || 0) + Math.max(0, totalAmount - (paidAmount || 0))
       supplierDoc.paidAmount = (supplierDoc.paidAmount || 0) + (paidAmount || 0)
-      await supplierDoc.save({ session })
+      await supplierDoc.save({ session, validateModifiedOnly: true })
     }
 
     // Create transaction
@@ -257,7 +257,7 @@ const updatePurchase = async (req, res) => {
         oldSupplierDoc.totalAmount = Math.max(0, (oldSupplierDoc.totalAmount || 0) - (purchase.totalAmount || 0))
         oldSupplierDoc.pendingAmount = Math.max(0, (oldSupplierDoc.pendingAmount || 0) - Math.max(0, (purchase.totalAmount || 0) - (purchase.paidAmount || 0)))
         oldSupplierDoc.paidAmount = Math.max(0, (oldSupplierDoc.paidAmount || 0) - (purchase.paidAmount || 0))
-        await oldSupplierDoc.save({ session })
+        await oldSupplierDoc.save({ session, validateModifiedOnly: true })
       }
     }
 
@@ -349,14 +349,14 @@ const updatePurchase = async (req, res) => {
       newSupplierDoc.totalAmount = (newSupplierDoc.totalAmount || 0) + totalAmount
       newSupplierDoc.pendingAmount = (newSupplierDoc.pendingAmount || 0) + Math.max(0, totalAmount - (paidAmount || 0))
       newSupplierDoc.paidAmount = (newSupplierDoc.paidAmount || 0) + (paidAmount || 0)
-      await newSupplierDoc.save({ session })
+      await newSupplierDoc.save({ session, validateModifiedOnly: true })
     } else if (!newSupplierDoc && oldSupplierDoc && supplier === undefined) {
        // if we didn't get a new supplier, keep the old one, but we must update its ledger for the new amounts
        if (totalAmount !== undefined) {
           oldSupplierDoc.totalAmount = (oldSupplierDoc.totalAmount || 0) + totalAmount
           oldSupplierDoc.pendingAmount = (oldSupplierDoc.pendingAmount || 0) + Math.max(0, totalAmount - (paidAmount || 0))
           oldSupplierDoc.paidAmount = (oldSupplierDoc.paidAmount || 0) + (paidAmount || 0)
-          await oldSupplierDoc.save({ session })
+          await oldSupplierDoc.save({ session, validateModifiedOnly: true })
        }
     }
 
@@ -379,7 +379,7 @@ const updatePurchase = async (req, res) => {
     if (paymentMethods !== undefined) purchase.paymentMethods = paymentMethods
     if (date !== undefined) purchase.date = date
     if (notes !== undefined) purchase.notes = notes
-    await purchase.save({ session })
+    await purchase.save({ session, validateModifiedOnly: true })
 
     // 7. Update transaction record
     await Transaction.findOneAndUpdate(
@@ -448,7 +448,7 @@ const deletePurchase = async (req, res) => {
         supplierDoc.totalAmount = Math.max(0, (supplierDoc.totalAmount || 0) - (purchase.totalAmount || 0))
         supplierDoc.pendingAmount = Math.max(0, (supplierDoc.pendingAmount || 0) - Math.max(0, (purchase.totalAmount || 0) - (purchase.paidAmount || 0)))
         supplierDoc.paidAmount = Math.max(0, (supplierDoc.paidAmount || 0) - (purchase.paidAmount || 0))
-        await supplierDoc.save({ session })
+        await supplierDoc.save({ session, validateModifiedOnly: true })
       }
     }
 
@@ -518,13 +518,13 @@ const cancelPurchase = async (req, res) => {
         supplierDoc.totalAmount = Math.max(0, (supplierDoc.totalAmount || 0) - purchase.totalAmount)
         supplierDoc.pendingAmount = Math.max(0, (supplierDoc.pendingAmount || 0) - Math.max(0, purchase.totalAmount - (purchase.paidAmount || 0)))
         supplierDoc.paidAmount = Math.max(0, (supplierDoc.paidAmount || 0) - (purchase.paidAmount || 0))
-        await supplierDoc.save({ session })
+        await supplierDoc.save({ session, validateModifiedOnly: true })
       }
     }
     purchase.status = 'cancelled'
     purchase.cancelledAt = new Date()
     purchase.cancelReason = cancelReason || ''
-    await purchase.save({ session })
+    await purchase.save({ session, validateModifiedOnly: true })
 
     // Create transaction record for cancellation (if money was paid)
     if (purchase.paidAmount > 0) {

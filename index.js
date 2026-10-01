@@ -92,7 +92,8 @@ app.use((error, req, res, next) => {
   }
   if (error.name === 'ValidationError') {
     const errors = Object.fromEntries(Object.entries(error.errors).map(([key, value]) => [key, value.message]))
-    return res.status(422).json({ success: false, message: 'Validation failed', errors })
+      const detailedMessage = 'Validation failed: ' + Object.values(errors).join(', ')
+      return res.status(422).json({ success: false, message: detailedMessage, errors })
   }
   console.error('⚠️ ERROR:', error.message)
   console.error('   Stack:', error.stack)
