@@ -230,17 +230,19 @@ const deleteReturn = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Company return not found', errors: {} })
     }
 
-    const allImeis = []
-    if (companyReturn.imei) allImeis.push(companyReturn.imei)
-    if (companyReturn.imeis && Array.isArray(companyReturn.imeis)) allImeis.push(...companyReturn.imeis)
+    const rawImeis = []
+    if (companyReturn.imei) rawImeis.push(companyReturn.imei)
+    if (companyReturn.imeis && Array.isArray(companyReturn.imeis)) rawImeis.push(...companyReturn.imeis)
+    
+    const uniqueImeis = [...new Set(rawImeis.map(im => String(im || '').trim()).filter(Boolean))]
 
-    if (allImeis.length > 0) {
+    if (uniqueImeis.length > 0) {
       const imeiResult = await Imei.updateMany(
-        { imeiNumber: { $in: allImeis }, status: 'returned' },
+        { imeiNumber: { $in: uniqueImeis }, status: 'returned' },
         { $set: { status: 'available' } },
         { session }
       )
-      if (imeiResult.modifiedCount !== allImeis.length) {
+      if (imeiResult.modifiedCount !== uniqueImeis.length) {
         await session.abortTransaction()
         session.endSession()
         return res.status(422).json({ success: false, message: 'Cannot delete return: Some items are no longer in returned state.', errors: {} })
