@@ -36,7 +36,10 @@ const withImeiStock = async (products) => {
 }
 
 const productData = (body) => {
-  const { imeiNumber, imeiNumbers, ...data } = body
+  const { imeiNumbers, ...data } = body
+  if (data.imeiNumber === 'Multiple' || data.imeiNumber === 'N/A') {
+    delete data.imeiNumber
+  }
   return data
 }
 
@@ -235,7 +238,7 @@ const create = async (req, res) => {
       if (await Imei.exists({ imeiNumber: initialImei })) {
         await session.abortTransaction()
         session.endSession()
-        return res.status(409).json({ success: false, message: 'This IMEI number already exists', errors: { imeiNumber: 'Duplicate IMEI number' } })
+        return res.status(409).json({ success: false, message: 'This IMEI number already exists', code: 'DUPLICATE_IMEI', errors: { imeiNumber: 'Duplicate IMEI number' } })
       }
     }
     
@@ -267,6 +270,9 @@ const create = async (req, res) => {
   } catch (error) {
     await session.abortTransaction()
     session.endSession()
+    if (error.code === 11000) {
+      return res.status(409).json({ success: false, message: 'This IMEI number already exists', code: 'DUPLICATE_IMEI', errors: { imeiNumber: 'Duplicate IMEI number' } })
+    }
     res.status(500).json({ success: false, message: 'Failed to create product', errors: { error: error.message } })
   }
 }
@@ -280,6 +286,42 @@ const update = async (req, res) => {
       await session.abortTransaction()
       session.endSession()
       return res.status(404).json({ success: false, message: 'Product not found', errors: {} })
+    }
+
+    const newImei = String(req.body.imeiNumber || '').trim()
+
+    if (newImei && newImei !== 'N/A' && newImei !== 'Multiple') {
+      if (!isValidIMEI(newImei)) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(400).json({ success: false, message: 'IMEI must be exactly 15 digits.', errors: { imeiNumber: 'IMEI must be exactly 15 digits.' } })
+      }
+      
+      const existingImei = await Imei.findOne({ imeiNumber: newImei }).session(session)
+      if (existingImei && String(existingImei.productId) !== String(oldProduct._id)) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(409).json({ success: false, message: 'This IMEI number already exists', code: 'DUPLICATE_IMEI', errors: { imeiNumber: 'Duplicate IMEI number' } })
+      }
+      
+      if (!existingImei) {
+        // If it doesn't exist, we need to update the old one or create a new one.
+        const currentImeis = await Imei.find({ productId: oldProduct._id }).session(session)
+        if (currentImeis.length === 1) {
+          // Safe to update the only IMEI
+          await Imei.updateOne({ _id: currentImeis[0]._id }, { imeiNumber: newImei }, { session })
+        } else if (currentImeis.length === 0) {
+          // No IMEI existed, create one
+          await Imei.create([{ productId: oldProduct._id, imeiNumber: newImei }], { session })
+        } else {
+          // Multiple IMEIs exist. We can't safely know WHICH one to rename.
+          // But wait, the frontend sends oldImeiNumber! Let's use it if available.
+          const oldImeiFromReq = String(req.body.oldImeiNumber || '').trim()
+          if (oldImeiFromReq && oldImeiFromReq !== 'N/A' && oldImeiFromReq !== 'Multiple') {
+             await Imei.updateOne({ productId: oldProduct._id, imeiNumber: oldImeiFromReq }, { imeiNumber: newImei }, { session })
+          }
+        }
+      }
     }
 
     const product = await Product.findByIdAndUpdate(req.params.id, productData(req.body), { new: true, runValidators: true, session })
@@ -307,6 +349,9 @@ const update = async (req, res) => {
   } catch (error) {
     await session.abortTransaction()
     session.endSession()
+    if (error.code === 11000) {
+      return res.status(409).json({ success: false, message: 'This IMEI number already exists', code: 'DUPLICATE_IMEI', errors: { imeiNumber: 'Duplicate IMEI number' } })
+    }
     res.status(500).json({ success: false, message: 'Failed to update product', errors: { error: error.message } })
   }
 }
@@ -354,3 +399,5 @@ const remove = async (req, res) => {
 }
 
 module.exports = { list, listPublic, listWholesale, getOne, create, update, remove }
+
+
