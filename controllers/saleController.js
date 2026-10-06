@@ -1403,6 +1403,13 @@ const deleteDraft = async (req, res) => {
           await mongoose.model('Product').findByIdAndUpdate(item.productId, { $inc: { stock: Math.abs(item.qty || 1) } }, { session })
         }
       }
+      
+      // CRITICAL FIX: Restore customer balance if deleting an active bill permanently
+      if (sale.customerId) {
+        await mongoose.model('Customer').findByIdAndUpdate(sale.customerId, { 
+          $inc: { totalPurchases: -sale.grandTotal, balance: -sale.amountDue } 
+        }, { session })
+      }
     }
 
     // 3. Delete FinanceRecord if present
