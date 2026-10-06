@@ -328,14 +328,46 @@ const update = async (req, res) => {
     
     const oldPrice = Number(oldProduct.purchasePrice || 0)
     const newPrice = Number(product.purchasePrice || 0)
-    const priceDiff = newPrice - oldPrice
+    
+    const oldSupplierId = oldProduct.supplierId ? String(oldProduct.supplierId) : null
+    const newSupplierId = product.supplierId ? String(product.supplierId) : null
 
-    if (priceDiff !== 0 && product.supplierId) {
-      const supplier = await Supplier.findById(product.supplierId).session(session)
-      if (supplier) {
-        const imeiCount = await Imei.countDocuments({ productId: product._id, status: { $ne: 'archived' } }).session(session)
-        if (imeiCount > 0) {
-          const totalDiff = priceDiff * imeiCount
+    const imeiCount = await Imei.countDocuments({ productId: product._id, status: { $ne: 'archived' } }).session(session)
+    
+    if (imeiCount > 0) {
+      if (oldSupplierId !== newSupplierId) {
+        // Supplier changed! Deduct from old, add to new.
+        if (oldSupplierId) {
+          const oldSupplier = await Supplier.findById(oldSupplierId).session(session)
+          if (oldSupplier) {
+            const deductAmount = oldPrice * imeiCount
+            oldSupplier.totalAmount = Math.max(0, oldSupplier.totalAmount - deductAmount)
+            if (oldSupplier.pendingAmount >= deductAmount) {
+              oldSupplier.pendingAmount -= deductAmount
+            } else {
+              const excess = deductAmount - oldSupplier.pendingAmount
+              oldSupplier.pendingAmount = 0
+              oldSupplier.paidAmount = Math.max(0, oldSupplier.paidAmount - excess)
+            }
+            oldSupplier.pendingAmount = Math.max(0, oldSupplier.totalAmount - oldSupplier.paidAmount)
+            await oldSupplier.save({ session, validateModifiedOnly: true })
+          }
+        }
+        if (newSupplierId) {
+          const newSupplier = await Supplier.findById(newSupplierId).session(session)
+          if (newSupplier) {
+            const addAmount = newPrice * imeiCount
+            newSupplier.totalAmount += addAmount
+            newSupplier.pendingAmount = Math.max(0, newSupplier.totalAmount - newSupplier.paidAmount)
+            await newSupplier.save({ session, validateModifiedOnly: true })
+          }
+        }
+      } else if (oldSupplierId && oldPrice !== newPrice) {
+        // Same supplier, price changed
+        const priceDiff = newPrice - oldPrice
+        const totalDiff = priceDiff * imeiCount
+        const supplier = await Supplier.findById(oldSupplierId).session(session)
+        if (supplier) {
           supplier.totalAmount = Math.max(0, supplier.totalAmount + totalDiff)
           supplier.pendingAmount = Math.max(0, supplier.totalAmount - supplier.paidAmount)
           await supplier.save({ session, validateModifiedOnly: true })

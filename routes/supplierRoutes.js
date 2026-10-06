@@ -40,21 +40,47 @@ router.get('/', async (req, res, next) => {
 // 2. POST / - Create a new supplier
 router.post('/', async (req, res, next) => {
   try {
-    const { name, type, shopName, phone, status, totalAmount, paidAmount, pendingAmount } = req.body
+    let { name, type, shopName, phone, status, totalAmount, paidAmount, pendingAmount } = req.body
     
     if (!name || !type) {
       return res.status(400).json({ success: false, message: 'Supplier name and type are required' })
     }
 
+    name = name.trim()
+    shopName = (shopName || '').trim()
+    phone = (phone || '').trim()
+
+    // Duplicate check for private suppliers
+    if (type === 'private') {
+      const existing = await Supplier.findOne({
+        name: new RegExp('^' + name + '$', 'i'),
+        shopName: new RegExp('^' + shopName + '$', 'i'),
+        phone: phone,
+        type: 'private'
+      })
+      if (existing) {
+        return res.status(409).json({ success: false, message: 'Supplier already exists.' })
+      }
+    } else if (type === 'company') {
+      // For company, checking just the name is usually enough
+      const existing = await Supplier.findOne({
+        name: new RegExp('^' + name + '$', 'i'),
+        type: 'company'
+      })
+      if (existing) {
+        return res.status(409).json({ success: false, message: 'Company Supplier already exists.' })
+      }
+    }
+
     const supplier = new Supplier({
       name,
       type,
-      shopName: shopName || '',
-      phone: phone || '',
+      shopName,
+      phone,
       status: status || 'active',
       totalAmount: Number(totalAmount || 0),
       paidAmount: Number(paidAmount || 0),
-      pendingAmount: Number(pendingAmount ?? (totalAmount - paidAmount || 0))
+      pendingAmount: Number(pendingAmount ?? (Number(totalAmount || 0) - Number(paidAmount || 0)))
     })
 
     await supplier.save()
@@ -233,3 +259,4 @@ router.delete('/:id', async (req, res, next) => {
 })
 
 module.exports = router
+
